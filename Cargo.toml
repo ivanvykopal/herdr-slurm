@@ -1,0 +1,20 @@
+[package]
+name = "herdr-slurm"
+version = "0.2.0"
+edition = "2021"
+description = "Live SLURM/HPC job monitor sidebar for herdr"
+license = "MIT"
+
+[[bin]]
+name = "herdr-slurm"
+path = "src/main.rs"
+
+[dependencies]
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+crossterm = "0.28"
+serde_json = "1"
+toml = "0.8"
+
+[profile.release]
+strip = true
+lto = true
