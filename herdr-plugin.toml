@@ -12,6 +12,7 @@
 id = "ivan.herdr-slurm"
 name = "SLURM Sidebar"
 version = "0.2.0"
+min_herdr_version = "0.8.0"
 description = "Live SLURM/HPC job monitor sidebar: squeue for your clusters over SSH."
 platforms = ["linux", "macos", "windows"]
 
