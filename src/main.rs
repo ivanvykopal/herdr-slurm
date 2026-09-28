@@ -1,7 +1,8 @@
 use std::collections::HashMap;
 use std::env;
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant, SystemTime};
 
 const REFRESH_SECS: u64 = 20;
@@ -215,32 +216,57 @@ fn query_machine(machine: &Machine) -> QueryResult {
     Ok(parse_slurm_jobs(&text))
 }
 
-fn run_command_with_timeout(
-    command: &mut Command,
-    timeout: Duration,
-) -> Result<std::process::Output, String> {
-    command.stdout(Stdio::piped());
+fn run_command_with_timeout(command: &mut Command, timeout: Duration) -> Result<Output, String> {
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = command
         .spawn()
         .map_err(|_| "ssh not found in PATH".to_string())?;
+    let mut stdout = child.stdout.take().ok_or("failed to capture stdout")?;
+    let mut stderr = child.stderr.take().ok_or("failed to capture stderr")?;
+    let stdout_reader = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        stdout.read_to_end(&mut bytes).map(|_| bytes)
+    });
+    let stderr_reader = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        stderr.read_to_end(&mut bytes).map(|_| bytes)
+    });
     let started = Instant::now();
-    loop {
+    let status = loop {
         match child.try_wait() {
-            Ok(Some(_)) => return child.wait_with_output().map_err(|error| error.to_string()),
+            Ok(Some(status)) => break Ok(status),
             Ok(None) if started.elapsed() < timeout => {
                 std::thread::sleep(Duration::from_millis(10))
             }
             Ok(None) => {
                 let _ = child.kill();
                 let _ = child.wait();
-                return Err(format!(
+                break Err(format!(
                     "scheduler query timed out after {}s",
                     timeout.as_secs()
                 ));
             }
-            Err(error) => return Err(error.to_string()),
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break Err(error.to_string());
+            }
         }
-    }
+    };
+    let stdout = stdout_reader
+        .join()
+        .map_err(|_| "stdout reader panicked".to_string())?
+        .map_err(|error| error.to_string())?;
+    let stderr = stderr_reader
+        .join()
+        .map_err(|_| "stderr reader panicked".to_string())?
+        .map_err(|error| error.to_string())?;
+
+    Ok(Output {
+        status: status?,
+        stdout,
+        stderr,
+    })
 }
 
 fn parse_slurm_jobs(text: &str) -> Vec<Job> {
@@ -1128,6 +1154,25 @@ scheduler_user = "sam"
         let error = run_command_with_timeout(&mut command, Duration::from_millis(20)).unwrap_err();
         assert!(error.contains("timed out"));
         assert!(started.elapsed() < Duration::from_millis(500));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn command_capture_drains_large_stdout_and_stderr_without_timing_out() {
+        const OUTPUT_BYTES: usize = 1024 * 1024;
+        let mut command = Command::new("sh");
+        command
+            .args([
+                "-c",
+                "dd if=/dev/zero bs=1048576 count=1 2>/dev/null; dd if=/dev/zero bs=1048576 count=1 1>&2 2>/dev/null",
+            ])
+            .stderr(Stdio::piped());
+
+        let output = run_command_with_timeout(&mut command, Duration::from_secs(3)).unwrap();
+
+        assert!(output.status.success());
+        assert_eq!(output.stdout.len(), OUTPUT_BYTES);
+        assert_eq!(output.stderr.len(), OUTPUT_BYTES);
     }
 
     #[test]
