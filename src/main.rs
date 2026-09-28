@@ -20,6 +20,7 @@ struct Machine {
     host: String,
     scheduler: Scheduler,
     scheduler_user: String,
+    scheduler_command: String,
     ssh_user: Option<String>,
 }
 
@@ -61,6 +62,7 @@ fn config_dir() -> PathBuf {
 const TEMPLATE: &str = r#"# herdr scheduler machines. One [[machine]] block per cluster.
 # `scheduler` is "slurm" (default) or "pbs".
 # `scheduler_user` is the account whose jobs should be shown.
+# `scheduler_command` optionally sets the remote scheduler executable.
 # SSH uses Host/User from ~/.ssh/config unless `ssh_user` is set.
 # Legacy `user` remains an alias for `scheduler_user`.
 # `name` should match a saved `herdr machine` label so the sidebar token
@@ -71,6 +73,7 @@ name = "MyCluster"
 host = "login.example.org"
 scheduler = "slurm"
 scheduler_user = "your-cluster-login"
+# scheduler_command = "/path/to/squeue"
 "#;
 
 fn load_machines() -> Option<Vec<Machine>> {
@@ -108,6 +111,20 @@ fn parse_machines(raw: &str) -> Result<Vec<Machine>, String> {
                 "pbs" | "openpbs" => Scheduler::Pbs,
                 other => return Err(format!("unsupported scheduler '{other}'")),
             };
+            let scheduler_command = match g("scheduler_command") {
+                value if value.is_empty() => match scheduler {
+                    Scheduler::Slurm => "squeue".into(),
+                    Scheduler::Pbs => "qstat".into(),
+                },
+                value => value,
+            };
+            if scheduler_command.starts_with('-')
+                || !scheduler_command
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '\\' | '_' | '-' | '.'))
+            {
+                return Err(format!("invalid scheduler_command '{scheduler_command}'"));
+            }
             let scheduler_user = match g("scheduler_user") {
                 value if value.is_empty() => legacy_user,
                 value => value,
@@ -128,6 +145,7 @@ fn parse_machines(raw: &str) -> Result<Vec<Machine>, String> {
                 host: g("host"),
                 scheduler,
                 scheduler_user,
+                scheduler_command,
                 ssh_user,
             });
         }
@@ -142,8 +160,11 @@ fn parse_machines(raw: &str) -> Result<Vec<Machine>, String> {
 
 fn remote_command(machine: &Machine) -> String {
     match machine.scheduler {
-        Scheduler::Slurm => format!("squeue -u {} -h -o '{SQUEUE_FMT}'", machine.scheduler_user),
-        Scheduler::Pbs => "qstat -f -F json".into(),
+        Scheduler::Slurm => format!(
+            "{} -u {} -h -o '{SQUEUE_FMT}'",
+            machine.scheduler_command, machine.scheduler_user
+        ),
+        Scheduler::Pbs => format!("{} -f -F json", machine.scheduler_command),
     }
 }
 
@@ -864,6 +885,26 @@ ssh_user = "login-user"
     }
 
     #[test]
+    fn pbs_machine_config_uses_configured_scheduler_executable() {
+        let machines = parse_machines(
+            r#"
+[[machine]]
+name = "Polaris"
+host = "polaris"
+scheduler = "pbs"
+scheduler_user = "sam"
+scheduler_command = "/opt/pbs/bin/qstat"
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            remote_command(&machines[0]),
+            "/opt/pbs/bin/qstat -f -F json"
+        );
+    }
+
+    #[test]
     fn config_rejects_unknown_scheduler() {
         let error = parse_machines(
             r#"
@@ -892,6 +933,25 @@ scheduler_user = "sam; id"
         .unwrap_err();
 
         assert!(error.contains("invalid scheduler_user"));
+    }
+
+    #[test]
+    fn config_rejects_scheduler_command_shell_syntax() {
+        for command in ["qstat;id", "qstat --version", "$(id)", "-qstat"] {
+            let raw = format!(
+                r#"
+[[machine]]
+name = "Cluster"
+host = "cluster"
+scheduler = "pbs"
+scheduler_user = "sam"
+scheduler_command = "{command}"
+"#
+            );
+
+            let error = parse_machines(&raw).unwrap_err();
+            assert!(error.contains("invalid scheduler_command"), "{command}");
+        }
     }
 
     #[test]
@@ -990,10 +1050,12 @@ scheduler_user = "sam; id"
             host: "polaris".into(),
             scheduler: Scheduler::Slurm,
             scheduler_user: "sam".into(),
+            scheduler_command: "squeue".into(),
             ssh_user: None,
         };
         let pbs = Machine {
             scheduler: Scheduler::Pbs,
+            scheduler_command: "qstat".into(),
             ..slurm.clone()
         };
 

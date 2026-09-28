@@ -60,6 +60,7 @@ name = "MyCluster"          # match your `herdr machine` label
 host = "login.example.org"
 scheduler = "slurm"         # "slurm" (default) or "pbs"
 scheduler_user = "queue-user"
+# scheduler_command = "/path/to/squeue" # optional; executable only
 # ssh_user = "login-user"   # optional; prefer ~/.ssh/config
 ```
 
@@ -76,11 +77,18 @@ name = "Aurora"
 host = "aurora"             # SSH config alias
 scheduler = "pbs"
 scheduler_user = "your-alcf-username"
+scheduler_command = "/opt/pbs/bin/qstat"
 ```
 
-PBS queries use `qstat -f -F json`, then filter `Job_Owner` locally. The
-parser maps PBS states to the shared display states and reads walltime,
-account/project, node count (`nodect` or `select`), comments, and `exec_host`.
+`scheduler_command` selects the remote scheduler executable when it is not on
+the noninteractive SSH `PATH`. It defaults to `squeue` for Slurm and `qstat`
+for PBS. Set an executable name or path only; shell syntax and arguments are
+rejected.
+
+PBS queries use `<scheduler_command> -f -F json`, then filter `Job_Owner`
+locally. The parser maps PBS states to the shared display states and reads
+walltime, account/project, node count (`nodect` or `select`), comments, and
+`exec_host`.
 SSH must work non-interactively (`BatchMode=yes`). Make `name` identical to
 the label of a saved `herdr machine` so sidebar metadata lands correctly.
 
