@@ -94,6 +94,8 @@ or `select`), comments, and `exec_host`.
 SSH must work non-interactively (`BatchMode=yes`). Make `name` identical to
 the label of a saved `herdr machine` so sidebar metadata lands correctly. Each
 remote query is terminated after 15 seconds.
+Scheduler capture retains at most 8 MiB of stdout and 1 MiB of stderr while
+continuing to drain both streams, then reports oversized output as an error.
 
 ## Actions
 

@@ -9,6 +9,8 @@ const REFRESH_SECS: u64 = 20;
 const TARGET_COLS: usize = 50; // sidebar width used by the `open` subcommand
 const SQUEUE_FMT: &str = "%.18i|%j|%T|%M|%D|%a|%R|%N";
 const MAX_PBS_JSON_BYTES: usize = 8 * 1024 * 1024;
+const MAX_SCHEDULER_STDOUT_BYTES: usize = MAX_PBS_JSON_BYTES;
+const MAX_SCHEDULER_STDERR_BYTES: usize = 1024 * 1024;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Scheduler {
@@ -218,55 +220,98 @@ fn query_machine(machine: &Machine) -> QueryResult {
 
 fn run_command_with_timeout(command: &mut Command, timeout: Duration) -> Result<Output, String> {
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
     let mut child = command
         .spawn()
         .map_err(|_| "ssh not found in PATH".to_string())?;
     let mut stdout = child.stdout.take().ok_or("failed to capture stdout")?;
     let mut stderr = child.stderr.take().ok_or("failed to capture stderr")?;
-    let stdout_reader = std::thread::spawn(move || {
-        let mut bytes = Vec::new();
-        stdout.read_to_end(&mut bytes).map(|_| bytes)
-    });
-    let stderr_reader = std::thread::spawn(move || {
-        let mut bytes = Vec::new();
-        stderr.read_to_end(&mut bytes).map(|_| bytes)
-    });
+    let stdout_reader =
+        std::thread::spawn(move || read_bounded(&mut stdout, MAX_SCHEDULER_STDOUT_BYTES));
+    let stderr_reader =
+        std::thread::spawn(move || read_bounded(&mut stderr, MAX_SCHEDULER_STDERR_BYTES));
     let started = Instant::now();
-    let status = loop {
+    let mut status = None;
+    loop {
         match child.try_wait() {
-            Ok(Some(status)) => break Ok(status),
-            Ok(None) if started.elapsed() < timeout => {
-                std::thread::sleep(Duration::from_millis(10))
-            }
-            Ok(None) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                break Err(format!(
-                    "scheduler query timed out after {}s",
-                    timeout.as_secs()
-                ));
-            }
+            Ok(Some(exit_status)) => status = Some(exit_status),
+            Ok(None) => {}
             Err(error) => {
-                let _ = child.kill();
+                terminate_command(&mut child);
                 let _ = child.wait();
-                break Err(error.to_string());
+                return Err(error.to_string());
             }
         }
-    };
-    let stdout = stdout_reader
+        if status.is_some() && stdout_reader.is_finished() && stderr_reader.is_finished() {
+            break;
+        }
+        if started.elapsed() >= timeout {
+            terminate_command(&mut child);
+            if status.is_none() {
+                let _ = child.wait();
+            }
+            return Err(format!(
+                "scheduler query timed out after {}s",
+                timeout.as_secs()
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let (stdout, stdout_exceeded) = stdout_reader
         .join()
         .map_err(|_| "stdout reader panicked".to_string())?
         .map_err(|error| error.to_string())?;
-    let stderr = stderr_reader
+    let (stderr, stderr_exceeded) = stderr_reader
         .join()
         .map_err(|_| "stderr reader panicked".to_string())?
         .map_err(|error| error.to_string())?;
 
+    let status = status.ok_or("scheduler command exited without a status")?;
+    if stdout_exceeded {
+        return Err(format!(
+            "scheduler stdout exceeded {MAX_SCHEDULER_STDOUT_BYTES} bytes"
+        ));
+    }
+    if stderr_exceeded {
+        return Err(format!(
+            "scheduler stderr exceeded {MAX_SCHEDULER_STDERR_BYTES} bytes"
+        ));
+    }
+
     Ok(Output {
-        status: status?,
+        status,
         stdout,
         stderr,
     })
+}
+
+fn read_bounded(reader: &mut impl Read, limit: usize) -> std::io::Result<(Vec<u8>, bool)> {
+    let mut bytes = Vec::with_capacity(limit.min(64 * 1024));
+    let mut buffer = [0_u8; 64 * 1024];
+    let mut exceeded = false;
+    loop {
+        let count = reader.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        let remaining = limit.saturating_sub(bytes.len());
+        bytes.extend_from_slice(&buffer[..count.min(remaining)]);
+        exceeded |= count > remaining;
+    }
+    Ok((bytes, exceeded))
+}
+
+fn terminate_command(child: &mut std::process::Child) {
+    #[cfg(unix)]
+    unsafe {
+        libc::kill(-(child.id() as i32), libc::SIGKILL);
+    }
+    #[cfg(not(unix))]
+    let _ = child.kill();
 }
 
 fn parse_slurm_jobs(text: &str) -> Vec<Job> {
@@ -1147,13 +1192,60 @@ scheduler_user = "sam"
 
     #[cfg(unix)]
     #[test]
-    fn command_timeout_terminates_slow_remote_query() {
+    fn command_timeout_terminates_descendants_holding_capture_pipes() {
+        let pid_path = env::temp_dir().join(format!(
+            "herdr-slurm-descendant-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let script = format!("sleep 30 & echo $! > '{}'", pid_path.display());
         let mut command = Command::new("sh");
-        command.args(["-c", "sleep 1"]);
+        command.args(["-c", &script]);
         let started = Instant::now();
-        let error = run_command_with_timeout(&mut command, Duration::from_millis(20)).unwrap_err();
+        let error = run_command_with_timeout(&mut command, Duration::from_millis(100)).unwrap_err();
         assert!(error.contains("timed out"));
-        assert!(started.elapsed() < Duration::from_millis(500));
+        assert!(started.elapsed() < Duration::from_secs(1));
+
+        let descendant_pid: i32 = std::fs::read_to_string(&pid_path)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        std::fs::remove_file(pid_path).unwrap();
+        let reap_deadline = Instant::now() + Duration::from_secs(1);
+        while unsafe { libc::kill(descendant_pid, 0) } == 0 && Instant::now() < reap_deadline {
+            std::thread::yield_now();
+        }
+        assert_eq!(unsafe { libc::kill(descendant_pid, 0) }, -1);
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ESRCH)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn command_capture_rejects_stdout_over_limit() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "dd if=/dev/zero bs=1048576 count=9 2>/dev/null"]);
+
+        let error = run_command_with_timeout(&mut command, Duration::from_secs(3)).unwrap_err();
+
+        assert!(error.contains("stdout exceeded"), "{error}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn command_capture_rejects_stderr_over_limit() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "dd if=/dev/zero bs=1048576 count=2 1>&2 2>/dev/null"]);
+
+        let error = run_command_with_timeout(&mut command, Duration::from_secs(3)).unwrap_err();
+
+        assert!(error.contains("stderr exceeded"), "{error}");
     }
 
     #[cfg(unix)]
