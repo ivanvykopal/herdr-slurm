@@ -55,6 +55,7 @@ herdr plugin config-dir ivan.herdr-slurm
 
 Edit `machines.toml` (auto-created from a template on first run):
 
+```toml
 [[machine]]
 name = "MyCluster"          # match your `herdr machine` label
 host = "login.example.org"
@@ -86,11 +87,13 @@ for PBS. Set an executable name or path only; shell syntax and arguments are
 rejected.
 
 PBS queries use `<scheduler_command> -f -F json`, then filter `Job_Owner`
-locally. The parser maps PBS states to the shared display states and reads
-walltime, account/project, node count (`nodect` or `select`), comments, and
-`exec_host`.
+locally, falling back to `euser` and `Variable_List.PBS_O_LOGNAME`. The parser
+maps PBS states to the shared display states, tolerates common non-standard
+`qstat` JSON values, and reads walltime, account/project, node count (`nodect`
+or `select`), comments, and `exec_host`.
 SSH must work non-interactively (`BatchMode=yes`). Make `name` identical to
-the label of a saved `herdr machine` so sidebar metadata lands correctly.
+the label of a saved `herdr machine` so sidebar metadata lands correctly. Each
+remote query is terminated after 15 seconds.
 
 ## Actions
 

@@ -7,6 +7,7 @@ use std::time::{Duration, Instant, SystemTime};
 const REFRESH_SECS: u64 = 20;
 const TARGET_COLS: usize = 50; // sidebar width used by the `open` subcommand
 const SQUEUE_FMT: &str = "%.18i|%j|%T|%M|%D|%a|%R|%N";
+const MAX_PBS_JSON_BYTES: usize = 8 * 1024 * 1024;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Scheduler {
@@ -140,9 +141,27 @@ fn parse_machines(raw: &str) -> Result<Vec<Machine>, String> {
                 value if value.is_empty() => None,
                 value => Some(value),
             };
+            let host = g("host");
+            if host.is_empty()
+                || host.starts_with('-')
+                || !host.chars().all(|c| {
+                    c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | ':' | '[' | ']')
+                })
+            {
+                return Err(format!("invalid host '{host}'"));
+            }
+            if let Some(user) = &ssh_user {
+                if user.starts_with('-')
+                    || !user
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
+                {
+                    return Err(format!("invalid ssh_user '{user}'"));
+                }
+            }
             out.push(Machine {
                 name: g("name"),
-                host: g("host"),
+                host,
                 scheduler,
                 scheduler_user,
                 scheduler_command,
@@ -170,7 +189,8 @@ fn remote_command(machine: &Machine) -> String {
 
 fn query_machine(machine: &Machine) -> QueryResult {
     let remote = remote_command(machine);
-    let out = Command::new("ssh")
+    let mut command = Command::new("ssh");
+    command
         .args([
             "-o",
             "BatchMode=yes",
@@ -181,12 +201,8 @@ fn query_machine(machine: &Machine) -> QueryResult {
         ])
         .arg(machine.ssh_target())
         .arg(&remote)
-        .stderr(Stdio::piped())
-        .output();
-    let out = match out {
-        Ok(o) => o,
-        Err(_) => return Err("ssh not found in PATH".into()),
-    };
+        .stderr(Stdio::piped());
+    let out = run_command_with_timeout(&mut command, Duration::from_secs(15))?;
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr);
         let last = err.lines().last().unwrap_or("scheduler query failed");
@@ -197,6 +213,34 @@ fn query_machine(machine: &Machine) -> QueryResult {
         return parse_pbs_jobs(&text, &machine.scheduler_user);
     }
     Ok(parse_slurm_jobs(&text))
+}
+
+fn run_command_with_timeout(
+    command: &mut Command,
+    timeout: Duration,
+) -> Result<std::process::Output, String> {
+    command.stdout(Stdio::piped());
+    let mut child = command
+        .spawn()
+        .map_err(|_| "ssh not found in PATH".to_string())?;
+    let started = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return child.wait_with_output().map_err(|error| error.to_string()),
+            Ok(None) if started.elapsed() < timeout => {
+                std::thread::sleep(Duration::from_millis(10))
+            }
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!(
+                    "scheduler query timed out after {}s",
+                    timeout.as_secs()
+                ));
+            }
+            Err(error) => return Err(error.to_string()),
+        }
+    }
 }
 
 fn parse_slurm_jobs(text: &str) -> Vec<Job> {
@@ -221,7 +265,8 @@ fn parse_slurm_jobs(text: &str) -> Vec<Job> {
 }
 
 fn parse_pbs_jobs(text: &str, scheduler_user: &str) -> QueryResult {
-    let root: serde_json::Value = serde_json::from_str(text).map_err(|e| e.to_string())?;
+    let repaired = repair_pbs_json(text)?;
+    let root: serde_json::Value = serde_json::from_str(&repaired).map_err(|e| e.to_string())?;
     let jobs = root
         .get("Jobs")
         .and_then(|value| value.as_object())
@@ -231,17 +276,24 @@ fn parse_pbs_jobs(text: &str, scheduler_user: &str) -> QueryResult {
         let Some(job) = value.as_object() else {
             continue;
         };
-        let Some(owner) = job.get("Job_Owner").and_then(|value| value.as_str()) else {
-            continue;
-        };
-        if owner.split('@').next() != Some(scheduler_user) {
+        let owner = job
+            .get("Job_Owner")
+            .and_then(|value| value.as_str())
+            .or_else(|| job.get("euser").and_then(|value| value.as_str()))
+            .or_else(|| {
+                job.get("Variable_List")
+                    .and_then(|value| value.as_object())
+                    .and_then(|variables| variables.get("PBS_O_LOGNAME"))
+                    .and_then(|value| value.as_str())
+            });
+        if owner.and_then(|owner| owner.split('@').next()) != Some(scheduler_user) {
             continue;
         }
         let string = |key: &str| {
             job.get(key)
                 .and_then(|value| value.as_str())
-                .unwrap_or("")
-                .to_string()
+                .map(sanitize_display_text)
+                .unwrap_or_default()
         };
         let resources = job.get("Resource_List").and_then(|value| value.as_object());
         let nodes = resources
@@ -266,7 +318,7 @@ fn parse_pbs_jobs(text: &str, scheduler_user: &str) -> QueryResult {
             .unwrap_or_default();
         let state = normalize_pbs_state(&string("job_state"));
         parsed.push(Job {
-            id: id.clone(),
+            id: sanitize_display_text(id),
             name: string("Job_Name"),
             state,
             elapsed,
@@ -277,6 +329,104 @@ fn parse_pbs_jobs(text: &str, scheduler_user: &str) -> QueryResult {
         });
     }
     Ok(parsed)
+}
+
+fn sanitize_display_text(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| if ch.is_control() { ' ' } else { ch })
+        .collect()
+}
+
+fn repair_pbs_json(text: &str) -> Result<String, String> {
+    if text.len() > MAX_PBS_JSON_BYTES {
+        return Err(format!(
+            "qstat JSON is too large ({} bytes; limit is {MAX_PBS_JSON_BYTES})",
+            text.len()
+        ));
+    }
+
+    let chars: Vec<char> = text.chars().collect();
+    let mut repaired = String::with_capacity(text.len());
+    let mut in_string = false;
+    let mut index = 0;
+    while index < chars.len() {
+        let ch = chars[index];
+        if in_string {
+            match ch {
+                '"' => {
+                    in_string = false;
+                    repaired.push(ch);
+                }
+                '\\' if index + 1 < chars.len() => {
+                    let escaped = chars[index + 1];
+                    let valid_unicode = escaped == 'u'
+                        && index + 5 < chars.len()
+                        && chars[index + 2..=index + 5]
+                            .iter()
+                            .all(|digit| digit.is_ascii_hexdigit());
+                    if matches!(escaped, '"' | '\\' | '/' | 'b' | 'f' | 'n' | 'r' | 't')
+                        || valid_unicode
+                    {
+                        repaired.push(ch);
+                        repaired.push(escaped);
+                        index += 2;
+                        continue;
+                    }
+                    repaired.push_str("\\\\");
+                }
+                c if c.is_control() => repaired.push(' '),
+                _ => repaired.push(ch),
+            }
+            index += 1;
+            continue;
+        }
+
+        if ch == '"' {
+            in_string = true;
+            repaired.push(ch);
+            index += 1;
+            continue;
+        }
+        if ch.is_control() {
+            repaired.push(' ');
+            index += 1;
+            continue;
+        }
+
+        let token_len = [
+            "-infinity",
+            "+infinity",
+            "infinity",
+            "-inf",
+            "+inf",
+            "nan",
+            "inf",
+        ]
+        .iter()
+        .find(|token| {
+            let token_len = token.len();
+            index + token_len <= chars.len()
+                && chars[index..index + token_len]
+                    .iter()
+                    .zip(token.chars())
+                    .all(|(actual, expected)| actual.eq_ignore_ascii_case(&expected))
+        })
+        .map(|token| token.len());
+        if let Some(len) = token_len {
+            let before_ok = index == 0 || !chars[index - 1].is_ascii_alphanumeric();
+            let after = index + len;
+            let after_ok = after >= chars.len() || !chars[after].is_ascii_alphanumeric();
+            if before_ok && after_ok {
+                repaired.push_str("null");
+                index += len;
+                continue;
+            }
+        }
+        repaired.push(ch);
+        index += 1;
+    }
+    Ok(repaired)
 }
 
 fn json_scalar(value: &serde_json::Value) -> Option<String> {
@@ -307,7 +457,7 @@ fn normalize_pbs_state(state: &str) -> String {
         "Q" | "W" => "PENDING".into(),
         "H" | "S" | "U" => "SUSPENDED".into(),
         "E" => "COMPLETING".into(),
-        "F" | "X" => "COMPLETED".into(),
+        "C" | "F" | "X" => "COMPLETED".into(),
         "T" => "TRANSIT".into(),
         "M" => "MOVED".into(),
         other => format!("UNKNOWN({other})"),
@@ -936,6 +1086,51 @@ scheduler_user = "sam; id"
     }
 
     #[test]
+    fn config_rejects_ssh_option_and_command_injection() {
+        for (field, value) in [
+            ("host", "-oProxyCommand=id"),
+            ("host", "cluster;id"),
+            ("host", "user@cluster"),
+            ("ssh_user", "-oProxyCommand=id"),
+            ("ssh_user", "sam@evil"),
+            ("ssh_user", "sam;id"),
+        ] {
+            let host = if field == "host" { value } else { "cluster" };
+            let extra = if field == "ssh_user" {
+                format!("ssh_user = \"{value}\"")
+            } else {
+                String::new()
+            };
+            let raw = format!(
+                r#"
+[[machine]]
+name = "Cluster"
+host = "{host}"
+scheduler_user = "sam"
+{extra}
+"#
+            );
+
+            let error = parse_machines(&raw).unwrap_err();
+            assert!(
+                error.contains(&format!("invalid {field}")),
+                "{field}={value}: {error}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn command_timeout_terminates_slow_remote_query() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "sleep 1"]);
+        let started = Instant::now();
+        let error = run_command_with_timeout(&mut command, Duration::from_millis(20)).unwrap_err();
+        assert!(error.contains("timed out"));
+        assert!(started.elapsed() < Duration::from_millis(500));
+    }
+
+    #[test]
     fn config_rejects_scheduler_command_shell_syntax() {
         for command in ["qstat;id", "qstat --version", "$(id)", "-qstat"] {
             let raw = format!(
@@ -1005,6 +1200,22 @@ scheduler_command = "{command}"
     }
 
     #[test]
+    fn pbs_parser_falls_back_to_euser_and_pbs_logname() {
+        let input = r#"{
+          "Jobs": {
+            "euser.server": {"euser":"sam", "Job_Name":"one", "job_state":"Q"},
+            "logname.server": {"Variable_List":{"PBS_O_LOGNAME":"sam"}, "Job_Name":"two", "job_state":"Q"},
+            "other.server": {"euser":"other", "Job_Name":"skip", "job_state":"Q"}
+          }
+        }"#;
+
+        let jobs = parse_pbs_jobs(input, "sam").unwrap();
+        assert_eq!(jobs.len(), 2);
+        assert_eq!(jobs[0].id, "euser.server");
+        assert_eq!(jobs[1].id, "logname.server");
+    }
+
+    #[test]
     fn normalizes_all_common_pbs_states() {
         let cases = [
             ("R", "RUNNING"),
@@ -1014,6 +1225,7 @@ scheduler_command = "{command}"
             ("S", "SUSPENDED"),
             ("U", "SUSPENDED"),
             ("E", "COMPLETING"),
+            ("C", "COMPLETED"),
             ("F", "COMPLETED"),
             ("X", "COMPLETED"),
             ("T", "TRANSIT"),
@@ -1041,6 +1253,29 @@ scheduler_command = "{command}"
         assert_eq!(jobs[0].id, "good.server");
         assert!(parse_pbs_jobs("not json", "sam").is_err());
         assert!(parse_pbs_jobs(r#"{"Jobs": []}"#, "sam").is_err());
+    }
+
+    #[test]
+    fn pbs_parser_repairs_nonstandard_scalars_escapes_and_control_bytes() {
+        let input = concat!(
+            r#"{"Jobs":{"bad.server":{"Job_Owner":"other@host","score":nan,"limit":-inf,"path":"bad\q","unicode":"bad\uZZZZ"},"#,
+            "\"good.server\":{\"Job_Owner\":\"sam@host\",\"Job_Name\":\"ok\\u0001 \\\"quoted\\\" name\",\"job_state\":\"R\"}}}"
+        );
+
+        let jobs = parse_pbs_jobs(input, "sam").unwrap();
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].id, "good.server");
+        assert_eq!(jobs[0].name, "ok  \"quoted\" name");
+    }
+
+    #[test]
+    fn pbs_parser_bounds_repair_input() {
+        let oversized = " ".repeat(8 * 1024 * 1024 + 1);
+        let error = match parse_pbs_jobs(&oversized, "sam") {
+            Ok(_) => panic!("oversized input was accepted"),
+            Err(error) => error,
+        };
+        assert!(error.contains("too large"));
     }
 
     #[test]
