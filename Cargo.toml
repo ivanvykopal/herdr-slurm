@@ -1,8 +1,8 @@
 [package]
 name = "herdr-slurm"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
-description = "Live SLURM/HPC job monitor sidebar for herdr"
+description = "Live Slurm and PBS job monitor sidebar for herdr"
 license = "MIT"
 
 [[bin]]
