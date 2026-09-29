@@ -70,6 +70,12 @@ the SSH identity; otherwise `host` is passed directly to SSH so `~/.ssh/config`
 can select the login. Existing configs remain valid: omitted `scheduler`
 defaults to `slurm`, and `user` remains an alias for `scheduler_user`.
 
+An invalid `[[machine]]` entry is skipped, not fatal. The pane prints
+`herdr-slurm: skipping machine '<name>': <reason>` and keeps rendering every
+valid cluster. Only an unparseable file (`invalid TOML in <path>`) or a file
+with no valid entries left (`invalid config in <path>: no valid machines; ...`)
+blanks the pane.
+
 For ALCF PBS systems such as Aurora:
 
 ```toml

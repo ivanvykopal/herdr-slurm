@@ -93,89 +93,155 @@ fn load_machines() -> Option<Vec<Machine>> {
             return None;
         }
     };
-    let out = match parse_machines(&raw) {
+    let parsed = match parse_machines(&raw) {
         Ok(v) => v,
-        Err(e) => {
+        Err(ParseMachinesError::InvalidToml(e)) => {
             println!("herdr-slurm: invalid TOML in {}: {}", path.display(), e);
             return None;
         }
+        Err(ParseMachinesError::NoValidMachines(e)) => {
+            println!("herdr-slurm: invalid config in {}: {}", path.display(), e);
+            return None;
+        }
     };
-    Some(out)
+    for warning in parsed.warnings {
+        println!("herdr-slurm: {warning}");
+    }
+    Some(parsed.machines)
 }
 
-fn parse_machines(raw: &str) -> Result<Vec<Machine>, String> {
-    let value: toml::Value = toml::from_str(raw).map_err(|e| e.to_string())?;
+#[derive(Debug)]
+enum ParseMachinesError {
+    InvalidToml(String),
+    NoValidMachines(String),
+}
+
+impl std::fmt::Display for ParseMachinesError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidToml(error) | Self::NoValidMachines(error) => f.write_str(error),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct ParsedMachines {
+    machines: Vec<Machine>,
+    warnings: Vec<String>,
+}
+
+fn parse_machines(raw: &str) -> Result<ParsedMachines, ParseMachinesError> {
+    let value: toml::Value =
+        toml::from_str(raw).map_err(|e| ParseMachinesError::InvalidToml(e.to_string()))?;
     let mut out = Vec::new();
+    let mut warnings = Vec::new();
     if let Some(list) = value.get("machine").and_then(|v| v.as_array()) {
         for m in list {
-            let g = |k: &str| m.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
-            let legacy_user = g("user");
-            let scheduler = match g("scheduler").to_ascii_lowercase().as_str() {
-                "" | "slurm" => Scheduler::Slurm,
-                "pbs" | "openpbs" => Scheduler::Pbs,
-                other => return Err(format!("unsupported scheduler '{other}'")),
-            };
-            let scheduler_command = match g("scheduler_command") {
-                value if value.is_empty() => match scheduler {
-                    Scheduler::Slurm => "squeue".into(),
-                    Scheduler::Pbs => "qstat".into(),
-                },
-                value => value,
-            };
-            if scheduler_command.starts_with('-')
-                || !scheduler_command
-                    .chars()
-                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '\\' | '_' | '-' | '.'))
-            {
-                return Err(format!("invalid scheduler_command '{scheduler_command}'"));
-            }
-            let scheduler_user = match g("scheduler_user") {
-                value if value.is_empty() => legacy_user,
-                value => value,
-            };
-            if scheduler_user.is_empty()
-                || !scheduler_user
-                    .chars()
-                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
-            {
-                return Err(format!("invalid scheduler_user '{scheduler_user}'"));
-            }
-            let ssh_user = match g("ssh_user") {
-                value if value.is_empty() => None,
-                value => Some(value),
-            };
-            let host = g("host");
-            if host.is_empty()
-                || host.starts_with('-')
-                || !host.chars().all(|c| {
-                    c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | ':' | '[' | ']')
-                })
-            {
-                return Err(format!("invalid host '{host}'"));
-            }
-            if let Some(user) = &ssh_user {
-                if user.starts_with('-')
-                    || !user
-                        .chars()
-                        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
-                {
-                    return Err(format!("invalid ssh_user '{user}'"));
+            match parse_machine_entry(m) {
+                Ok(machine) => out.push(machine),
+                Err(error) => {
+                    warnings.push(format!("skipping machine '{}': {error}", machine_label(m)))
                 }
             }
-            out.push(Machine {
-                name: g("name"),
-                host,
-                scheduler,
-                scheduler_user,
-                scheduler_command,
-                ssh_user,
-            });
         }
     }
     if out.is_empty() {
-        return Err("no [[machine]] entries".into());
+        let details = if warnings.is_empty() {
+            "no [[machine]] entries".to_string()
+        } else {
+            format!("no valid machines; {}", warnings.join("; "))
+        };
+        return Err(ParseMachinesError::NoValidMachines(details));
     }
-    Ok(out)
+    Ok(ParsedMachines {
+        machines: out,
+        warnings,
+    })
+}
+
+/// Best-effort identifier for a `[[machine]]` entry, used in skip warnings.
+fn machine_label(entry: &toml::Value) -> String {
+    for key in ["name", "host"] {
+        if let Some(value) = entry.get(key).and_then(|v| v.as_str()) {
+            if !value.is_empty() {
+                return value.to_string();
+            }
+        }
+    }
+    "<unnamed>".to_string()
+}
+
+/// Validate one `[[machine]]` entry. Errors describe the offending field and
+/// only ever reject that entry, never the rest of the config.
+fn parse_machine_entry(entry: &toml::Value) -> Result<Machine, String> {
+    let g = |k: &str| {
+        entry
+            .get(k)
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string()
+    };
+    let legacy_user = g("user");
+    let scheduler = match g("scheduler").to_ascii_lowercase().as_str() {
+        "" | "slurm" => Scheduler::Slurm,
+        "pbs" | "openpbs" => Scheduler::Pbs,
+        other => return Err(format!("unsupported scheduler '{other}'")),
+    };
+    let scheduler_command = match g("scheduler_command") {
+        value if value.is_empty() => match scheduler {
+            Scheduler::Slurm => "squeue".into(),
+            Scheduler::Pbs => "qstat".into(),
+        },
+        value => value,
+    };
+    if scheduler_command.starts_with('-')
+        || !scheduler_command
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '\\' | '_' | '-' | '.'))
+    {
+        return Err(format!("invalid scheduler_command '{scheduler_command}'"));
+    }
+    let scheduler_user = match g("scheduler_user") {
+        value if value.is_empty() => legacy_user,
+        value => value,
+    };
+    if scheduler_user.is_empty()
+        || !scheduler_user
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
+    {
+        return Err(format!("invalid scheduler_user '{scheduler_user}'"));
+    }
+    let ssh_user = match g("ssh_user") {
+        value if value.is_empty() => None,
+        value => Some(value),
+    };
+    let host = g("host");
+    if host.is_empty()
+        || host.starts_with('-')
+        || !host
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | ':' | '[' | ']'))
+    {
+        return Err(format!("invalid host '{host}'"));
+    }
+    if let Some(user) = &ssh_user {
+        if user.starts_with('-')
+            || !user
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
+        {
+            return Err(format!("invalid ssh_user '{user}'"));
+        }
+    }
+    Ok(Machine {
+        name: g("name"),
+        host,
+        scheduler,
+        scheduler_user,
+        scheduler_command,
+        ssh_user,
+    })
 }
 
 // -------------------------------------------------------------------- data --
@@ -1069,6 +1135,106 @@ mod tests {
     use super::*;
 
     #[test]
+    fn mixed_valid_and_invalid_machines_preserve_valid_entries_and_name_warning() {
+        let parsed = parse_machines(
+            r#"
+[[machine]]
+name = "Broken"
+host = "cluster;id"
+user = "sam"
+
+[[machine]]
+name = "Polaris"
+host = "polaris"
+user = "sam"
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(parsed.machines.len(), 1);
+        assert_eq!(parsed.machines[0].name, "Polaris");
+        assert_eq!(
+            parsed.warnings,
+            ["skipping machine 'Broken': invalid host 'cluster;id'"]
+        );
+    }
+
+    #[test]
+    fn legacy_machine_missing_user_skips_only_that_entry() {
+        let parsed = parse_machines(
+            r#"
+[[machine]]
+name = "Legacy"
+host = "legacy"
+
+[[machine]]
+name = "Polaris"
+host = "polaris"
+user = "sam"
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(parsed.machines.len(), 1);
+        assert_eq!(parsed.machines[0].name, "Polaris");
+        assert_eq!(
+            parsed.warnings,
+            ["skipping machine 'Legacy': invalid scheduler_user ''"]
+        );
+    }
+
+    #[test]
+    fn config_with_no_valid_machines_reports_no_valid_machines_error() {
+        let error = parse_machines(
+            r#"
+[[machine]]
+name = "Broken"
+host = "cluster;id"
+user = "sam"
+"#,
+        )
+        .unwrap_err();
+
+        assert!(matches!(error, ParseMachinesError::NoValidMachines(_)));
+        assert_eq!(
+            error.to_string(),
+            "no valid machines; skipping machine 'Broken': invalid host 'cluster;id'"
+        );
+    }
+
+    #[test]
+    fn empty_config_reports_no_machine_entries_error() {
+        let error = parse_machines("").unwrap_err();
+
+        assert!(matches!(error, ParseMachinesError::NoValidMachines(_)));
+        assert_eq!(error.to_string(), "no [[machine]] entries");
+    }
+
+    #[test]
+    fn malformed_toml_is_distinguished_from_invalid_machine_entries() {
+        let toml_error = parse_machines("this is not = = toml").unwrap_err();
+        assert!(matches!(toml_error, ParseMachinesError::InvalidToml(_)));
+
+        let semantic_error = parse_machines(
+            r#"
+[[machine]]
+name = "Cluster"
+host = "cluster"
+user = "sam"
+scheduler = "lsf"
+"#,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            semantic_error,
+            ParseMachinesError::NoValidMachines(_)
+        ));
+        assert!(semantic_error
+            .to_string()
+            .contains("unsupported scheduler 'lsf'"));
+    }
+
+    #[test]
     fn legacy_machine_config_defaults_to_slurm_and_ssh_config_identity() {
         let machines = parse_machines(
             r#"
@@ -1080,6 +1246,7 @@ user = "sam"
         )
         .unwrap();
 
+        let machines = machines.machines;
         assert_eq!(machines.len(), 1);
         assert_eq!(machines[0].scheduler, Scheduler::Slurm);
         assert_eq!(machines[0].scheduler_user, "sam");
@@ -1100,6 +1267,7 @@ ssh_user = "login-user"
         )
         .unwrap();
 
+        let machines = machines.machines;
         assert_eq!(machines[0].scheduler, Scheduler::Pbs);
         assert_eq!(machines[0].scheduler_user, "queue-user");
         assert_eq!(machines[0].ssh_target(), "login-user@aurora");
@@ -1120,7 +1288,7 @@ scheduler_command = "/opt/pbs/bin/qstat"
         .unwrap();
 
         assert_eq!(
-            remote_command(&machines[0]),
+            remote_command(&machines.machines[0]),
             "/opt/pbs/bin/qstat -f -F json"
         );
     }
@@ -1138,7 +1306,7 @@ scheduler = "lsf"
         )
         .unwrap_err();
 
-        assert!(error.contains("unsupported scheduler 'lsf'"));
+        assert!(error.to_string().contains("unsupported scheduler 'lsf'"));
     }
 
     #[test]
@@ -1153,7 +1321,7 @@ scheduler_user = "sam; id"
         )
         .unwrap_err();
 
-        assert!(error.contains("invalid scheduler_user"));
+        assert!(error.to_string().contains("invalid scheduler_user"));
     }
 
     #[test]
@@ -1182,7 +1350,7 @@ scheduler_user = "sam"
 "#
             );
 
-            let error = parse_machines(&raw).unwrap_err();
+            let error = parse_machines(&raw).unwrap_err().to_string();
             assert!(
                 error.contains(&format!("invalid {field}")),
                 "{field}={value}: {error}"
@@ -1281,7 +1449,7 @@ scheduler_command = "{command}"
 "#
             );
 
-            let error = parse_machines(&raw).unwrap_err();
+            let error = parse_machines(&raw).unwrap_err().to_string();
             assert!(error.contains("invalid scheduler_command"), "{command}");
         }
     }
