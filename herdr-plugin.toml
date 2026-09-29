@@ -4,6 +4,9 @@
 #   herdr-slurm          (default) sidebar TUI pane
 #   herdr-slurm open     open/resize the sidebar pane
 #   herdr-slurm refresh  one-shot scheduler snapshot to stdout
+#   herdr-slurm start    ensure the detached sidebar-token daemon runs
+#   herdr-slurm stop     stop that daemon
+#   herdr-slurm daemon   foreground poll/report loop (internal)
 #
 # Configure machines in the plugin config dir:
 #   herdr plugin config-dir ivan.herdr-slurm
@@ -11,13 +14,24 @@
 
 id = "ivan.herdr-slurm"
 name = "Scheduler Jobs Sidebar"
-version = "0.3.0"
+version = "0.4.0"
 min_herdr_version = "0.8.0"
 description = "Live Slurm and PBS job monitor sidebar for clusters over SSH."
 platforms = ["linux", "macos", "windows"]
 
 [[build]]
 command = ["cargo", "build", "--release"]
+
+# Keep the Machines sidebar `$slurm` token alive without the jobs pane:
+# spawn the detached squeue poller/token reporter if it is not running yet.
+# Idempotent — safe to run at every herdr server start / live handoff.
+[[startup]]
+command = ["./target/release/herdr-slurm", "start"]
+platforms = ["linux", "macos"]
+
+[[startup]]
+command = [".\\target\\release\\herdr-slurm.exe", "start"]
+platforms = ["windows"]
 
 [[panes]]
 id = "jobs"

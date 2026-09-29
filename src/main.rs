@@ -26,6 +26,7 @@ struct Machine {
     scheduler_user: String,
     scheduler_command: String,
     ssh_user: Option<String>,
+    session: String, // herdr session on the cluster to report to; "" = default
 }
 
 impl Machine {
@@ -54,13 +55,40 @@ type QueryResult = Result<Vec<Job>, String>;
 // ------------------------------------------------------------------ config --
 
 fn config_dir() -> PathBuf {
-    env::var("HERDR_PLUGIN_CONFIG_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| {
-            let mut p = env::current_exe().unwrap_or_default();
-            p.pop();
-            p
-        })
+    if let Ok(d) = env::var("HERDR_PLUGIN_CONFIG_DIR") {
+        return PathBuf::from(d);
+    }
+    // Ask herdr for the canonical plugin config dir (works when run from a
+    // pane, an action, or manually with herdr on PATH).
+    let args = vec![
+        herdr_bin(),
+        "plugin".into(),
+        "config-dir".into(),
+        "ivan.herdr-slurm".into(),
+    ];
+    if let Some(out) = run_capture(&args) {
+        let t = out.trim();
+        if !t.is_empty() {
+            return PathBuf::from(t);
+        }
+    }
+    // Platform fallback: herdr's default plugin config layout.
+    let base = if cfg!(windows) {
+        env::var("APPDATA").map(PathBuf::from).unwrap_or_default()
+    } else if cfg!(target_os = "macos") {
+        env::var("HOME")
+            .map(|h| PathBuf::from(h).join("Library/Application Support"))
+            .unwrap_or_default()
+    } else {
+        env::var("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .or_else(|_| env::var("HOME").map(|h| PathBuf::from(h).join(".config")))
+            .unwrap_or_default()
+    };
+    base.join("herdr")
+        .join("plugins")
+        .join("config")
+        .join("ivan.herdr-slurm")
 }
 
 const TEMPLATE: &str = r#"# herdr scheduler machines. One [[machine]] block per cluster.
@@ -69,8 +97,11 @@ const TEMPLATE: &str = r#"# herdr scheduler machines. One [[machine]] block per 
 # `scheduler_command` optionally sets the remote scheduler executable.
 # SSH uses Host/User from ~/.ssh/config unless `ssh_user` is set.
 # Legacy `user` remains an alias for `scheduler_user`.
-# `name` should match a saved `herdr machine` label so the sidebar token
-# lands under the right machine.
+# `name` is display-only: the pane heading and the sidebar fallback prefix.
+# The sidebar token is reported to the herdr server ON the cluster itself
+# (over ssh to `host`), so no herdr machine label has to match.
+# `session` (optional) is the herdr session on the cluster whose workspaces
+# get the sidebar token; omit it for the default session.
 
 [[machine]]
 name = "MyCluster"
@@ -78,6 +109,7 @@ host = "login.example.org"
 scheduler = "slurm"
 scheduler_user = "your-cluster-login"
 # scheduler_command = "/path/to/squeue"
+# session = "agents"
 "#;
 
 fn load_machines() -> Option<Vec<Machine>> {
@@ -234,6 +266,16 @@ fn parse_machine_entry(entry: &toml::Value) -> Result<Machine, String> {
             return Err(format!("invalid ssh_user '{user}'"));
         }
     }
+    // `session` lands inside a double-quoted remote shell argument
+    // (`herdr --session "..."`), so reject anything that could escape it.
+    let session = g("session");
+    if !session.is_empty()
+        && !session
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
+    {
+        return Err(format!("invalid session '{session}'"));
+    }
     Ok(Machine {
         name: g("name"),
         host,
@@ -241,6 +283,7 @@ fn parse_machine_entry(entry: &toml::Value) -> Result<Machine, String> {
         scheduler_user,
         scheduler_command,
         ssh_user,
+        session,
     })
 }
 
@@ -256,21 +299,32 @@ fn remote_command(machine: &Machine) -> String {
     }
 }
 
+// argv for running a command on the cluster over ssh. The local CLI's
+// remote path (`herdr --machine <label> ...`) is NOT used on purpose: on
+// Windows it allocates a visible console window whenever the caller has no
+// console (the detached daemon), flashing a window every poll cycle.
+fn ssh_argv(target: &str, remote: &str) -> Vec<String> {
+    let mut v: Vec<String> = [
+        "ssh",
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "ConnectTimeout=8",
+        "-o",
+        "LogLevel=ERROR",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    v.push(target.to_string());
+    v.push(remote.to_string());
+    v
+}
+
 fn query_machine(machine: &Machine) -> QueryResult {
-    let remote = remote_command(machine);
-    let mut command = Command::new("ssh");
-    command
-        .args([
-            "-o",
-            "BatchMode=yes",
-            "-o",
-            "ConnectTimeout=8",
-            "-o",
-            "LogLevel=ERROR",
-        ])
-        .arg(machine.ssh_target())
-        .arg(&remote)
-        .stderr(Stdio::piped());
+    let args = ssh_argv(&machine.ssh_target(), &remote_command(machine));
+    let mut command = new_command(&args[0]);
+    command.args(&args[1..]).stderr(Stdio::piped());
     let out = run_command_with_timeout(&mut command, Duration::from_secs(15))?;
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr);
@@ -791,8 +845,24 @@ fn herdr_bin() -> String {
     env::var("HERDR_BIN_PATH").unwrap_or_else(|_| "herdr".into())
 }
 
+// Every child this program spawns is capture-only (stdout/stderr piped or
+// null). On Windows, console-subsystem children (ssh, herdr) launched from
+// the console-less daemon would each allocate a fresh, visible console
+// window; CREATE_NO_WINDOW prevents that. It is harmless when a console
+// already exists (pane, action), so apply it unconditionally.
+fn new_command<S: AsRef<std::ffi::OsStr>>(prog: S) -> Command {
+    let mut cmd = Command::new(prog);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    cmd
+}
+
 fn run_capture(args: &[String]) -> Option<String> {
-    let out = Command::new(&args[0]).args(&args[1..]).output().ok()?;
+    let out = new_command(&args[0]).args(&args[1..]).output().ok()?;
     if out.status.success() {
         Some(String::from_utf8_lossy(&out.stdout).into_owned())
     } else {
@@ -800,24 +870,35 @@ fn run_capture(args: &[String]) -> Option<String> {
     }
 }
 
+// A herdr CLI invocation for the herdr server on the cluster, pinned to the
+// machine's configured session (tokens must land in the session the user's
+// sidebar actually shows). `session` is validated at config load, so the
+// double-quoted interpolation is safe.
+fn remote_herdr(m: &Machine, sub: &str) -> String {
+    if m.session.is_empty() {
+        format!("herdr {sub}")
+    } else {
+        format!("herdr --session \"{}\" {sub}", m.session)
+    }
+}
+
 fn workspace_ids(
-    machine: Option<&str>,
+    machine: Option<&Machine>,
     cache: &mut HashMap<String, (Instant, Vec<String>)>,
 ) -> Vec<String> {
-    let key = machine.unwrap_or("local").to_string();
+    let key = machine
+        .map(|m| m.name.as_str())
+        .unwrap_or("local")
+        .to_string();
     if let Some((ts, ids)) = cache.get(&key) {
         if ts.elapsed() < Duration::from_secs(300) && !ids.is_empty() {
             return ids.clone();
         }
     }
-    let herdr = herdr_bin();
-    let mut args = vec![herdr];
-    if let Some(m) = machine {
-        args.push("--machine".into());
-        args.push(m.to_string());
-    }
-    args.push("workspace".into());
-    args.push("list".into());
+    let args = match machine {
+        Some(m) => ssh_argv(&m.ssh_target(), &remote_herdr(m, "workspace list")),
+        None => vec![herdr_bin(), "workspace".into(), "list".into()],
+    };
     let mut ids = Vec::new();
     if let Some(stdout) = run_capture(&args) {
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(&stdout) {
@@ -875,42 +956,42 @@ fn report_sidebar_token(machines: &[Machine], results: &HashMap<String, QueryRes
             ids
         }
     };
+    let ttl_ms = (REFRESH_SECS + 70) * 1000;
     for m in machines {
-        let machine_ids = workspace_ids(Some(&m.name), &mut cache);
-        let (targets, prefix): (Vec<(String, String)>, Vec<String>) = if !machine_ids.is_empty() {
-            (
-                machine_ids
-                    .iter()
-                    .map(|w| (w.clone(), summarize(&results[&m.name], None)))
-                    .collect(),
-                vec![herdr.clone(), "--machine".into(), m.name.clone()],
-            )
-        } else {
-            (
-                local_ids
-                    .iter()
-                    .map(|w| (w.clone(), summarize(&results[&m.name], Some(&m.name))))
-                    .collect(),
-                vec![herdr.clone()],
-            )
-        };
-        for (wid, value) in targets {
-            let mut args = prefix.clone();
-            args.extend([
-                "workspace".to_string(),
-                "report-metadata".to_string(),
-                wid,
-                "--source".to_string(),
-                "ivan.herdr-slurm".to_string(),
-            ]);
-            for token in sidebar_tokens(&value) {
-                args.extend(["--token".to_string(), token]);
+        let machine_ids = workspace_ids(Some(m), &mut cache);
+        if !machine_ids.is_empty() {
+            // The cluster runs a reachable herdr server: report there over ssh.
+            let value = summarize(&results[&m.name], None);
+            for wid in &machine_ids {
+                let remote = remote_herdr(
+                    m,
+                    &format!(
+                        "workspace report-metadata {wid} --source ivan.herdr-slurm \
+                         --token \"scheduler={value}\" --token \"slurm={value}\" \
+                         --ttl-ms {ttl_ms}"
+                    ),
+                );
+                let args = ssh_argv(&m.ssh_target(), &remote);
+                let _ = new_command(&args[0]).args(&args[1..]).output();
             }
-            args.extend([
-                "--ttl-ms".to_string(),
-                ((REFRESH_SECS + 70) * 1000).to_string(),
-            ]);
-            let _ = Command::new(&args[0]).args(&args[1..]).output();
+        } else {
+            // No reachable herdr on the cluster: tag local workspaces instead.
+            let value = summarize(&results[&m.name], Some(&m.name));
+            for wid in &local_ids {
+                let mut args = vec![
+                    herdr.clone(),
+                    "workspace".into(),
+                    "report-metadata".into(),
+                    wid.clone(),
+                    "--source".into(),
+                    "ivan.herdr-slurm".into(),
+                ];
+                for token in sidebar_tokens(&value) {
+                    args.extend(["--token".to_string(), token]);
+                }
+                args.extend(["--ttl-ms".to_string(), ttl_ms.to_string()]);
+                let _ = new_command(&args[0]).args(&args[1..]).output();
+            }
         }
     }
 }
@@ -952,7 +1033,7 @@ fn cmd_open() {
         "jobs"
     };
     let plugin = env::var("HERDR_PLUGIN_ID").unwrap_or_else(|_| "ivan.herdr-slurm".into());
-    let out = Command::new(&herdr)
+    let out = new_command(&herdr)
         .args([
             "plugin",
             "pane",
@@ -1026,7 +1107,7 @@ fn resize_sidebar(herdr: &str, pane_id: &str) -> Result<(), String> {
     }
     let direction = if delta > 0 { "right" } else { "left" };
     let amount = (delta.abs() as f64 / area_w as f64).min(0.45);
-    let out = Command::new(herdr)
+    let out = new_command(herdr)
         .args([
             "pane",
             "resize",
@@ -1046,10 +1127,111 @@ fn resize_sidebar(herdr: &str, pane_id: &str) -> Result<(), String> {
     }
 }
 
+// --------------------------------------------------------------- daemon --
+
+// The Machines sidebar `$slurm`/`$scheduler` token must outlive the jobs
+// pane, so polling and token reporting happen in a detached background
+// process. A heartbeat file in the plugin state dir is the liveness signal;
+// deleting it asks the daemon to stop.
+
+const DAEMON_ALIVE_SECS: u64 = 40; // heartbeat younger than this = daemon running
+const HERDR_DEAD_CYCLE_LIMIT: u32 = 90; // ~30 min at 20 s polling
+
+fn state_dir() -> PathBuf {
+    if let Ok(d) = env::var("HERDR_PLUGIN_STATE_DIR") {
+        return PathBuf::from(d);
+    }
+    config_dir()
+}
+
+fn heartbeat_path() -> PathBuf {
+    state_dir().join("daemon.heartbeat")
+}
+
+fn heartbeat_age() -> Option<Duration> {
+    std::fs::metadata(heartbeat_path())
+        .and_then(|md| md.modified())
+        .ok()
+        .and_then(|t| t.elapsed().ok())
+}
+
+fn cmd_start() {
+    if let Some(age) = heartbeat_age() {
+        if age < Duration::from_secs(DAEMON_ALIVE_SECS) {
+            return; // daemon already running
+        }
+    }
+    let exe = match env::current_exe() {
+        Ok(e) => e,
+        Err(e) => {
+            eprintln!("herdr-slurm: cannot locate own executable: {e}");
+            return;
+        }
+    };
+    let mut cmd = new_command(exe);
+    cmd.arg("daemon")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    #[cfg(windows)]
+    {
+        // Detach from the caller's console so closing a herdr pane does not
+        // take the daemon down with it.
+        use std::os::windows::process::CommandExt;
+        const DETACHED_PROCESS: u32 = 0x0000_0008;
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+        cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
+    }
+    if let Err(e) = cmd.spawn() {
+        eprintln!("herdr-slurm: failed to spawn daemon: {e}");
+    }
+}
+
+fn cmd_stop() {
+    let _ = std::fs::remove_file(heartbeat_path());
+}
+
+fn cmd_daemon() {
+    let _ = std::fs::create_dir_all(state_dir());
+    let hb = heartbeat_path();
+    let mut beat_once = false;
+    let mut herdr_dead: u32 = 0;
+    loop {
+        if beat_once && !hb.exists() {
+            break; // stop requested
+        }
+        let _ = std::fs::write(&hb, std::process::id().to_string());
+        beat_once = true;
+        // If herdr is gone there is nobody to show tokens to; give up after
+        // ~30 minutes so the process does not linger forever.
+        let probe = vec![herdr_bin(), "workspace".into(), "list".into()];
+        if run_capture(&probe).is_some() {
+            herdr_dead = 0;
+        } else {
+            herdr_dead += 1;
+            if herdr_dead >= HERDR_DEAD_CYCLE_LIMIT {
+                break;
+            }
+        }
+        if let Some(machines) = load_machines() {
+            let mut results: HashMap<String, QueryResult> = HashMap::new();
+            for m in &machines {
+                results.insert(m.name.clone(), query_machine(m));
+            }
+            report_sidebar_token(&machines, &results);
+        }
+        std::thread::sleep(Duration::from_secs(REFRESH_SECS));
+    }
+    let _ = std::fs::remove_file(&hb);
+}
+
 // -------------------------------------------------------------------- main --
 
 fn cmd_sidebar() {
     use crossterm::event::{Event, KeyCode, KeyEventKind};
+    // Make sure the background token reporter is running so the Machines
+    // sidebar keeps job counts even after this pane is closed.
+    cmd_start();
     let _ = crossterm::terminal::enable_raw_mode();
     let mut stdout = std::io::stdout();
     let _ = crossterm::execute!(stdout, crossterm::terminal::LeaveAlternateScreen);
@@ -1068,7 +1250,6 @@ fn cmd_sidebar() {
         print!("{}", render(&machines, &results, SystemTime::now()));
         use std::io::Write;
         let _ = std::io::stdout().flush();
-        report_sidebar_token(&machines, &results);
         let deadline = Instant::now() + Duration::from_secs(REFRESH_SECS);
         let mut quit = false;
         while Instant::now() < deadline {
@@ -1121,6 +1302,9 @@ fn main() {
     match std::env::args().nth(1).as_deref() {
         Some("open") => cmd_open(),
         Some("refresh") => cmd_refresh(),
+        Some("start") => cmd_start(),
+        Some("stop") => cmd_stop(),
+        Some("daemon") => cmd_daemon(),
         Some("keytest") => cmd_keytest(),
         _ => cmd_sidebar(),
     }
@@ -1592,6 +1776,7 @@ scheduler_command = "{command}"
             scheduler_user: "sam".into(),
             scheduler_command: "squeue".into(),
             ssh_user: None,
+            session: String::new(),
         };
         let pbs = Machine {
             scheduler: Scheduler::Pbs,
@@ -1612,6 +1797,85 @@ scheduler_command = "{command}"
             sidebar_tokens("2 run, 1 pend"),
             ["scheduler=2 run, 1 pend", "slurm=2 run, 1 pend"]
         );
+    }
+
+    #[test]
+    fn config_parses_optional_session_and_defaults_to_empty() {
+        let parsed = parse_machines(
+            r#"
+[[machine]]
+name = "WithSession"
+host = "polaris"
+user = "sam"
+session = "agents"
+
+[[machine]]
+name = "NoSession"
+host = "polaris"
+user = "sam"
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(parsed.machines[0].session, "agents");
+        assert_eq!(parsed.machines[1].session, "");
+    }
+
+    #[test]
+    fn config_rejects_unsafe_session() {
+        for session in ["agents; id", "$(id)", "agents agents", "agents|id"] {
+            let raw = format!(
+                r#"
+[[machine]]
+name = "Cluster"
+host = "cluster"
+user = "sam"
+session = "{session}"
+"#
+            );
+
+            let error = parse_machines(&raw).unwrap_err().to_string();
+            assert!(
+                error.contains("invalid session"),
+                "session={session}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn remote_herdr_pins_configured_session() {
+        let machine = Machine {
+            name: "Polaris".into(),
+            host: "polaris".into(),
+            scheduler: Scheduler::Slurm,
+            scheduler_user: "sam".into(),
+            scheduler_command: "squeue".into(),
+            ssh_user: None,
+            session: "agents".into(),
+        };
+        let default_machine = Machine {
+            session: String::new(),
+            ..machine.clone()
+        };
+
+        assert_eq!(
+            remote_herdr(&machine, "workspace list"),
+            "herdr --session \"agents\" workspace list"
+        );
+        assert_eq!(
+            remote_herdr(&default_machine, "workspace list"),
+            "herdr workspace list"
+        );
+    }
+
+    #[test]
+    fn ssh_argv_uses_batch_options_and_target() {
+        let args = ssh_argv("sam@polaris", "herdr workspace list");
+
+        assert_eq!(args[0], "ssh");
+        assert!(args.windows(2).any(|w| w == ["-o", "BatchMode=yes"]));
+        assert_eq!(args[args.len() - 2], "sam@polaris");
+        assert_eq!(args[args.len() - 1], "herdr workspace list");
     }
 
     #[test]
