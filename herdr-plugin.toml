@@ -1,19 +1,19 @@
-# herdr-slurm — live SLURM/HPC job monitor sidebar for herdr.
+# herdr-slurm — live Slurm/PBS job monitor sidebar for herdr.
 #
 # Rust implementation. Subcommands:
 #   herdr-slurm          (default) sidebar TUI pane
 #   herdr-slurm open     open/resize the sidebar pane
-#   herdr-slurm refresh  one-shot squeue snapshot to stdout
+#   herdr-slurm refresh  one-shot scheduler snapshot to stdout
 #
 # Configure machines in the plugin config dir:
 #   herdr plugin config-dir ivan.herdr-slurm
 #   -> machines.toml (auto-created with a template on first run)
 
 id = "ivan.herdr-slurm"
-name = "SLURM Sidebar"
-version = "0.2.0"
+name = "Scheduler Jobs Sidebar"
+version = "0.3.0"
 min_herdr_version = "0.8.0"
-description = "Live SLURM/HPC job monitor sidebar: squeue for your clusters over SSH."
+description = "Live Slurm and PBS job monitor sidebar for clusters over SSH."
 platforms = ["linux", "macos", "windows"]
 
 [[build]]
@@ -21,14 +21,14 @@ command = ["cargo", "build", "--release"]
 
 [[panes]]
 id = "jobs"
-title = "SLURM Jobs"
+title = "Scheduler Jobs"
 placement = "split"
 command = ["./target/release/herdr-slurm"]
 platforms = ["linux", "macos"]
 
 [[panes]]
 id = "jobs-windows"
-title = "SLURM Jobs"
+title = "Scheduler Jobs"
 placement = "split"
 command = [".\\target\\release\\herdr-slurm.exe"]
 platforms = ["windows"]
@@ -36,14 +36,14 @@ platforms = ["windows"]
 # Manual one-shot refresh, printed to the pane the action is invoked from.
 [[actions]]
 id = "refresh"
-title = "SLURM: refresh now"
+title = "Scheduler: refresh now"
 contexts = ["workspace"]
 command = ["./target/release/herdr-slurm", "refresh"]
 platforms = ["linux", "macos"]
 
 [[actions]]
 id = "refresh-windows"
-title = "SLURM: refresh now"
+title = "Scheduler: refresh now"
 contexts = ["workspace"]
 command = [".\\target\\release\\herdr-slurm.exe", "refresh"]
 platforms = ["windows"]
@@ -51,14 +51,14 @@ platforms = ["windows"]
 # Open (or focus) the sidebar at sidebar width.
 [[actions]]
 id = "open"
-title = "SLURM: toggle jobs sidebar"
+title = "Scheduler: toggle jobs sidebar"
 contexts = ["workspace"]
 command = ["./target/release/herdr-slurm", "open"]
 platforms = ["linux", "macos"]
 
 [[actions]]
 id = "open-windows"
-title = "SLURM: toggle jobs sidebar"
+title = "Scheduler: toggle jobs sidebar"
 contexts = ["workspace"]
 command = [".\\target\\release\\herdr-slurm.exe", "open"]
 platforms = ["windows"]
