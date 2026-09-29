@@ -1,8 +1,8 @@
 [package]
 name = "herdr-slurm"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
-description = "Live SLURM/HPC job monitor sidebar for herdr"
+description = "Live Slurm and PBS job monitor sidebar for herdr"
 license = "MIT"
 
 [[bin]]
@@ -14,6 +14,9 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 crossterm = "0.28"
 serde_json = "1"
 toml = "0.8"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [profile.release]
 strip = true
