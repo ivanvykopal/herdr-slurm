@@ -14,7 +14,7 @@
 
 id = "ivan.herdr-slurm"
 name = "Scheduler Jobs Sidebar"
-version = "0.4.0"
+version = "0.4.1"
 min_herdr_version = "0.8.0"
 description = "Live Slurm and PBS job monitor sidebar for clusters over SSH."
 platforms = ["linux", "macos", "windows"]

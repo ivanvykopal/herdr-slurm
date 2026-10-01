@@ -22,8 +22,8 @@ split pane. Implemented in Rust.
   machine` label has to match. The daemon is spawned by herdr's
   `[[startup]]` hook (and re-spawned by the pane if needed); it polls the
   configured scheduler every 20 s per cluster while herdr is up. A machine
-  without a reachable herdr server falls back to local workspaces with a
-  name prefix. Add it to your Space rows in `config.toml`:
+  without a reachable herdr server gets no token (tokens are never written
+  to local workspaces). Add it to your Space rows in `config.toml`:
 
   ```toml
   [ui.sidebar.spaces]
@@ -63,7 +63,7 @@ Edit `machines.toml` (auto-created from a template on first run):
 
 ```toml
 [[machine]]
-name = "MyCluster"          # display label (pane + sidebar fallback prefix)
+name = "MyCluster"          # display label (pane heading)
 host = "login.example.org"
 scheduler = "slurm"         # "slurm" (default) or "pbs"
 scheduler_user = "queue-user"
@@ -81,7 +81,7 @@ SSH must work non-interactively (`BatchMode=yes`) — key-based auth required.
 `name` is display-only; the sidebar token is reported over ssh to the herdr
 server on the cluster itself (pinned to `session` when set), so no `herdr
 machine` label needs to match. A machine without a reachable herdr server
-falls back to local workspaces with the `name` prefix.
+simply reports nothing; tokens never land on local workspaces.
 
 An invalid `[[machine]]` entry is skipped, not fatal. The pane prints
 `herdr-slurm: skipping machine '<name>': <reason>` and keeps rendering every
