@@ -97,7 +97,7 @@ const TEMPLATE: &str = r#"# herdr scheduler machines. One [[machine]] block per 
 # `scheduler_command` optionally sets the remote scheduler executable.
 # SSH uses Host/User from ~/.ssh/config unless `ssh_user` is set.
 # Legacy `user` remains an alias for `scheduler_user`.
-# `name` is display-only: the pane heading and the sidebar fallback prefix.
+# `name` is display-only: the pane heading.
 # The sidebar token is reported to the herdr server ON the cluster itself
 # (over ssh to `host`), so no herdr machine label has to match.
 # `session` (optional) is the herdr session on the cluster whose workspaces
@@ -882,23 +882,13 @@ fn remote_herdr(m: &Machine, sub: &str) -> String {
     }
 }
 
-fn workspace_ids(
-    machine: Option<&Machine>,
-    cache: &mut HashMap<String, (Instant, Vec<String>)>,
-) -> Vec<String> {
-    let key = machine
-        .map(|m| m.name.as_str())
-        .unwrap_or("local")
-        .to_string();
-    if let Some((ts, ids)) = cache.get(&key) {
+fn workspace_ids(m: &Machine, cache: &mut HashMap<String, (Instant, Vec<String>)>) -> Vec<String> {
+    if let Some((ts, ids)) = cache.get(&m.name) {
         if ts.elapsed() < Duration::from_secs(300) && !ids.is_empty() {
             return ids.clone();
         }
     }
-    let args = match machine {
-        Some(m) => ssh_argv(&m.ssh_target(), &remote_herdr(m, "workspace list")),
-        None => vec![herdr_bin(), "workspace".into(), "list".into()],
-    };
+    let args = ssh_argv(&m.ssh_target(), &remote_herdr(m, "workspace list"));
     let mut ids = Vec::new();
     if let Some(stdout) = run_capture(&args) {
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(&stdout) {
@@ -912,18 +902,14 @@ fn workspace_ids(
         }
     }
     if !ids.is_empty() {
-        cache.insert(key, (Instant::now(), ids.clone()));
+        cache.insert(m.name.clone(), (Instant::now(), ids.clone()));
     }
     ids
 }
 
-fn summarize(jobs: &QueryResult, with_name: Option<&str>) -> String {
-    let prefix = match with_name {
-        Some(n) => format!("{n}: "),
-        None => String::new(),
-    };
+fn summarize(jobs: &QueryResult) -> String {
     match jobs {
-        Err(e) => format!("{prefix}✗ {e}"),
+        Err(e) => format!("✗ {e}"),
         Ok(js) => {
             let run = js.iter().filter(|j| j.state == "RUNNING").count();
             let pend = js.iter().filter(|j| j.state == "PENDING").count();
@@ -934,64 +920,34 @@ fn summarize(jobs: &QueryResult, with_name: Option<&str>) -> String {
             if run + pend < js.len() {
                 bits.push(format!("{} other", js.len() - run - pend));
             }
-            format!("{prefix}{}", bits.join(", "))
+            bits.join(", ")
         }
     }
 }
 
-fn sidebar_tokens(value: &str) -> [String; 2] {
-    [format!("scheduler={value}"), format!("slurm={value}")]
-}
-
 fn report_sidebar_token(machines: &[Machine], results: &HashMap<String, QueryResult>) {
-    let herdr = herdr_bin();
     let mut cache: HashMap<String, (Instant, Vec<String>)> = HashMap::new();
-    let local_ids = {
-        let ids = workspace_ids(None, &mut cache);
-        if ids.is_empty() {
-            env::var("HERDR_WORKSPACE_ID")
-                .map(|v| vec![v])
-                .unwrap_or_default()
-        } else {
-            ids
-        }
-    };
     let ttl_ms = (REFRESH_SECS + 70) * 1000;
     for m in machines {
-        let machine_ids = workspace_ids(Some(m), &mut cache);
-        if !machine_ids.is_empty() {
-            // The cluster runs a reachable herdr server: report there over ssh.
-            let value = summarize(&results[&m.name], None);
-            for wid in &machine_ids {
-                let remote = remote_herdr(
-                    m,
-                    &format!(
-                        "workspace report-metadata {wid} --source ivan.herdr-slurm \
-                         --token \"scheduler={value}\" --token \"slurm={value}\" \
-                         --ttl-ms {ttl_ms}"
-                    ),
-                );
-                let args = ssh_argv(&m.ssh_target(), &remote);
-                let _ = new_command(&args[0]).args(&args[1..]).output();
-            }
-        } else {
-            // No reachable herdr on the cluster: tag local workspaces instead.
-            let value = summarize(&results[&m.name], Some(&m.name));
-            for wid in &local_ids {
-                let mut args = vec![
-                    herdr.clone(),
-                    "workspace".into(),
-                    "report-metadata".into(),
-                    wid.clone(),
-                    "--source".into(),
-                    "ivan.herdr-slurm".into(),
-                ];
-                for token in sidebar_tokens(&value) {
-                    args.extend(["--token".to_string(), token]);
-                }
-                args.extend(["--ttl-ms".to_string(), ttl_ms.to_string()]);
-                let _ = new_command(&args[0]).args(&args[1..]).output();
-            }
+        let machine_ids = workspace_ids(m, &mut cache);
+        if machine_ids.is_empty() {
+            // No reachable herdr server on the cluster: nowhere to report.
+            // Tokens only ever land on the cluster's own workspaces, never
+            // on local ones.
+            continue;
+        }
+        let value = summarize(&results[&m.name]);
+        for wid in &machine_ids {
+            let remote = remote_herdr(
+                m,
+                &format!(
+                    "workspace report-metadata {wid} --source ivan.herdr-slurm \
+                     --token \"scheduler={value}\" --token \"slurm={value}\" \
+                     --ttl-ms {ttl_ms}"
+                ),
+            );
+            let args = ssh_argv(&m.ssh_target(), &remote);
+            let _ = new_command(&args[0]).args(&args[1..]).output();
         }
     }
 }
@@ -1789,14 +1745,6 @@ scheduler_command = "{command}"
             format!("squeue -u sam -h -o '{SQUEUE_FMT}'")
         );
         assert_eq!(remote_command(&pbs), "qstat -f -F json");
-    }
-
-    #[test]
-    fn sidebar_metadata_has_neutral_and_legacy_tokens() {
-        assert_eq!(
-            sidebar_tokens("2 run, 1 pend"),
-            ["scheduler=2 run, 1 pend", "slurm=2 run, 1 pend"]
-        );
     }
 
     #[test]
