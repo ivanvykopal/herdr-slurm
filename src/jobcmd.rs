@@ -372,6 +372,11 @@ fn action_command(m: &Machine, id: &str, verb: &str) -> Option<String> {
         (Scheduler::Pbs, "release") => ("qrls", ""),
         _ => return None,
     };
+    // PBS array ids (`4021[7]`) are glob patterns; quote them.
+    let id = match m.scheduler {
+        Scheduler::Slurm => id.to_string(),
+        Scheduler::Pbs => format!("'{id}'"),
+    };
     Some(format!("{}{sub} {id}", tool(m, name)))
 }
 
@@ -487,6 +492,7 @@ fn parse_final_pbs(text: &str, ids: &[String]) -> Vec<FinalJob> {
             let exit_code = kv.get("Exit_status").cloned();
             let state = match (kv.get("job_state").map(String::as_str), exit_code.as_deref()) {
                 (Some("F"), Some(e)) if e != "0" => "FAILED".to_string(),
+                (Some("F"), None) => "UNKNOWN".to_string(),
                 (Some(s), _) => normalize_pbs_state(s),
                 (None, _) => "UNKNOWN".to_string(),
             };
@@ -515,7 +521,7 @@ fn build_final_script(m: &Machine, ids: &[String]) -> String {
              {} -x -f {} 2>/dev/null | sed -e ':a' -e '$!N' -e 's/\\n\\t//' -e 'ta' -e 'P' -e 'D'\n\
              echo '@@herdr:end@@'\n",
             m.scheduler_command,
-            ids.join(" ")
+            ids.iter().map(|id| format!("'{id}'")).collect::<Vec<_>>().join(" ")
         ),
     }
 }
@@ -743,10 +749,10 @@ mod tests {
     fn action_maps_verbs_pbs() {
         let m = machine("pbs", "qstat");
         let a = |v: &str| action_command(&m, "123", v);
-        assert_eq!(a("cancel").as_deref(), Some("qdel 123"));
-        assert_eq!(a("requeue").as_deref(), Some("qrerun 123"));
-        assert_eq!(a("hold").as_deref(), Some("qhold 123"));
-        assert_eq!(a("release").as_deref(), Some("qrls 123"));
+        assert_eq!(a("cancel").as_deref(), Some("qdel '123'"));
+        assert_eq!(a("requeue").as_deref(), Some("qrerun '123'"));
+        assert_eq!(a("hold").as_deref(), Some("qhold '123'"));
+        assert_eq!(a("release").as_deref(), Some("qrls '123'"));
         assert_eq!(a("rm"), None);
     }
 
@@ -784,5 +790,10 @@ mod tests {
         assert_eq!(st, ["COMPLETED", "FAILED", "RUNNING", "UNKNOWN"]);
         assert_eq!(j[1].exit_code.as_deref(), Some("271"));
         assert_eq!(j[2].exit_code, None);
+        let j = parse_final_pbs("Job Id: 14.srv\n    job_state = F\n", &args(&["14"]));
+        assert_eq!(j[0].state, "UNKNOWN");
+        assert_eq!(j[0].exit_code, None);
+        let m = machine("pbs", "qstat");
+        assert!(build_final_script(&m, &args(&["1", "2[3]"])).contains("qstat -x -f '1' '2[3]'"));
     }
 }
