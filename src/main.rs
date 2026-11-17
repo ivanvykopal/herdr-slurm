@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant, SystemTime};
 
+mod cluster;
 mod jobcmd;
 mod remote;
 
@@ -30,7 +31,6 @@ struct Machine {
     scheduler_command: String,
     ssh_user: Option<String>,
     session: String, // herdr session on the cluster to report to; "" = default
-    #[allow(dead_code)] // read by the cluster subcommand (later task)
     storage: Vec<String>, // remote paths for disk-usage bars; [] = defaults
 }
 
@@ -1349,6 +1349,7 @@ fn main() {
         Some("job") => jobcmd::cmd_job(),
         Some("action") => jobcmd::cmd_action(),
         Some("final") => jobcmd::cmd_final(),
+        Some("cluster") => cluster::cmd_cluster(),
         Some("start") => cmd_start(),
         Some("stop") => cmd_stop(),
         Some("daemon") => cmd_daemon(),
