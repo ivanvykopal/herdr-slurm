@@ -116,6 +116,27 @@ export function storageNotice(alert) {
   return { title: `${alert.machine}: ${alert.path} ${alert.pct}% full`, body: "Free space before jobs fail.", level: "warning" };
 }
 
+/** @type {Record<string, number>} */
+const LEVEL_RANK = { success: 0, warning: 1, error: 2 };
+
+// One toast for many ended jobs on a machine: counts per state, most severe level.
+// `items` are `{ state, level }`.
+/** @param {string} machine @param {{ state: string, level: string }[]} items */
+export function endedSummary(machine, items) {
+  /** @type {Record<string, number>} */
+  const counts = {};
+  let level = "success";
+  for (const it of items) {
+    counts[it.state] = (counts[it.state] ?? 0) + 1;
+    if (LEVEL_RANK[it.level] > LEVEL_RANK[level]) level = it.level;
+  }
+  return {
+    title: `${machine}: ${items.length} jobs ended`,
+    body: Object.entries(counts).map(([s, n]) => `${n} ${s}`).join(", "),
+    level,
+  };
+}
+
 const ADOPT_MS = 120000;
 
 // A new leader continues the previous leader's maps only when they are recent;

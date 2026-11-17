@@ -75,11 +75,11 @@ export function detailBlock(t, ctx) {
   block.child(v_flex().id(`log-${key}`).max_h(LOG_MAX_H).overflow_y_scrollbar().track_scroll(ctx.scroll)
     .p(4).rounded(4).bg(t.background).font_family(ctx.font).text_size(11).text_color(t.foreground)
     .children(lines.length ? lines.map((l) => div().child(l || " ")) : [div().text_color(t.dim).child("(empty)")]));
-  // Newest line in view when the log changes; a log the reader scrolled up stays put otherwise.
-  const logKey = `${tab}\n${lines.join("\n")}`;
-  if (logKey !== det.logKey) {
+  // Newest line in view when the block opens or the tab changes; refetches leave the scroll alone.
+  const logKey = `${m.name}/${det.id}/${tab}`;
+  if (lines.length && logKey !== det.logKey) {
     det.logKey = logKey;
-    if (lines.length) ctx.scroll.scroll_to_item(lines.length - 1);
+    ctx.scroll.scroll_to_item(lines.length - 1);
   }
   return block;
 }

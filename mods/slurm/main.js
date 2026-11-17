@@ -1,7 +1,7 @@
 import { View, div } from "gpui-kit";
 import { v_flex, h_flex, ScrollHandle } from "gpui-base";
 import { exec, theme, props, shared, setShared, notify, playSound, checking, run, settings } from "herdr";
-import { endedJobs, storageAlerts, shouldLead, mustAdopt, jobNotice, storageNotice, adoptState, pendingStart, agentPrompt } from "./logic.js";
+import { endedJobs, storageAlerts, shouldLead, mustAdopt, jobNotice, storageNotice, adoptState, pendingStart, agentPrompt, endedSummary } from "./logic.js";
 import { detailBlock } from "./detail.js";
 import { clusterStrip } from "./strip.js";
 
@@ -9,6 +9,8 @@ const TICK_MS = 5000;
 const SNAPSHOT_MS = 20000;
 const CLUSTER_MS = 120000;
 const FINAL_MAX_IDS = 50;
+// More ended jobs than this on one machine in one poll get a single summary toast.
+const SUMMARY_OVER = 5;
 const DETAIL_MS = 20000;
 const LEASE = "slurm.leader";
 const STATE = "slurm.state";
@@ -57,6 +59,11 @@ export default class Slurm extends View {
     this.tick(cx);
     cx.timer.every(TICK_MS, (cx) => this.tick(cx));
     if (!this.watch) cx.timer.every(TICK_MS, (cx) => this.detailTick(cx));
+  }
+
+  // Release the lease so another copy takes over at once instead of after it goes stale.
+  async close(_cx) {
+    if (shared(LEASE)?.copy === this.copy) setShared(LEASE, null);
   }
 
   // Exactly one copy (the lease holder, watcher preferred) runs herdr-slurm and publishes
@@ -158,6 +165,7 @@ export default class Slurm extends View {
   async notifyEnded(ended) {
     const byMachine = {};
     for (const e of ended) (byMachine[e.machine] ??= []).push(e);
+    let sound = false;
     for (const [machine, entries] of Object.entries(byMachine)) {
       const finals = {};
       for (let i = 0; i < entries.length; i += FINAL_MAX_IDS) {
@@ -170,12 +178,18 @@ export default class Slurm extends View {
           // Unresolved jobs fall through as UNKNOWN.
         }
       }
-      for (const e of entries) {
-        const n = jobNotice(e, finals[String(e.id)] ?? null);
-        notify(n);
-        if (n.level === "error") playSound("blocked");
+      const items = entries.map((e) => {
+        const fin = finals[String(e.id)] ?? null;
+        return { notice: jobNotice(e, fin), state: fin?.state || "UNKNOWN" };
+      });
+      if (items.length > SUMMARY_OVER) {
+        notify(endedSummary(machine, items.map((it) => ({ state: it.state, level: it.notice.level }))));
+      } else {
+        for (const it of items) notify(it.notice);
       }
+      if (items.some((it) => it.notice.level === "error")) sound = true;
     }
+    if (sound) playSound("blocked");
   }
 
   // Expanded job: `herdr-slurm job` on open and every DETAIL_MS while open; `gpu` adds --gpu.
@@ -279,7 +293,7 @@ export default class Slurm extends View {
     const target = m.ssh_target || m.host;
     return detailBlock(t, {
       m, det,
-      font: settings().font_family ?? settings().font,
+      font: settings().font_family ?? settings().font ?? "JetBrains Mono",
       scroll: this.logScroll[m.name],
       onVerb: (verb, cx) => this.runAction(m, verb, cx),
       onConfirm: (verb, cx) => { det.confirm = verb; cx.notify(); },
