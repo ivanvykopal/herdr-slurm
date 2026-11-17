@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant, SystemTime};
 
+mod jobcmd;
 mod remote;
 
 const REFRESH_SECS: u64 = 20;
@@ -1345,6 +1346,7 @@ fn main() {
         Some("open") => cmd_open(),
         Some("refresh") => cmd_refresh(),
         Some("snapshot") => cmd_snapshot(),
+        Some("job") => jobcmd::cmd_job(),
         Some("start") => cmd_start(),
         Some("stop") => cmd_stop(),
         Some("daemon") => cmd_daemon(),

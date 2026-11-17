@@ -9,17 +9,16 @@ use crate::{
     ParsedMachines, Scheduler, TEMPLATE,
 };
 
-#[allow(dead_code)] // used by later subcommands
 pub struct RemoteOut {
     pub stdout: String,
     pub stderr: String,
+    #[allow(dead_code)] // read by the action subcommand (later task)
     pub ok: bool,
 }
 
 /// Job ids are pasted into remote shell commands, so accept only the
 /// scheduler's id grammar: Slurm `123` / `123_4`; PBS `4021`, `4021[]`,
 /// `4021[7]`, each optionally followed by `.server` (alnum, `-`, `.`).
-#[allow(dead_code)] // used by later subcommands
 pub fn valid_job_id(s: &Scheduler, id: &str) -> bool {
     let digits = |t: &str| !t.is_empty() && t.chars().all(|c| c.is_ascii_digit());
     match s {
@@ -54,7 +53,6 @@ pub fn valid_job_id(s: &Scheduler, id: &str) -> bool {
 
 /// Path of a sibling scheduler tool: next to `scheduler_command` when that is
 /// a path, else the bare name (resolved via the remote PATH).
-#[allow(dead_code)] // used by later subcommands
 pub fn tool(m: &Machine, name: &str) -> String {
     match m.scheduler_command.rfind('/') {
         Some(i) => format!("{}{name}", &m.scheduler_command[..=i]),
@@ -64,7 +62,6 @@ pub fn tool(m: &Machine, name: &str) -> String {
 
 /// Run `script` on the cluster over ssh. `Err` only when ssh cannot be
 /// spawned or times out; a failing remote command yields `ok: false`.
-#[allow(dead_code)] // used by later subcommands
 pub fn run_remote(m: &Machine, script: &str, timeout: Duration) -> Result<RemoteOut, String> {
     let args = ssh_argv(&m.ssh_target(), script);
     let mut command = new_command(&args[0]);
@@ -79,7 +76,6 @@ pub fn run_remote(m: &Machine, script: &str, timeout: Duration) -> Result<Remote
 
 /// Split output on `@@herdr:<name>@@` marker lines; each body is its lines
 /// joined with `\n` (no trailing newline). Text before the first marker is dropped.
-#[allow(dead_code)] // used by later subcommands
 pub fn sections(text: &str) -> HashMap<String, String> {
     let mut out = HashMap::new();
     let mut current: Option<(String, Vec<&str>)> = None;
@@ -103,7 +99,6 @@ pub fn sections(text: &str) -> HashMap<String, String> {
     out
 }
 
-#[allow(dead_code)] // used by later subcommands
 pub fn find_machine<'a>(ms: &'a [Machine], name: &str) -> Option<&'a Machine> {
     ms.iter().find(|m| m.name == name)
 }
