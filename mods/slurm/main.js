@@ -1,13 +1,16 @@
 import { View, div } from "gpui-kit";
 import { v_flex, h_flex, ScrollHandle } from "gpui-base";
 import { exec, theme, props, shared, setShared, notify, playSound, checking, run, settings } from "herdr";
-import { endedJobs, storageAlerts, shouldLead, mustAdopt, jobNotice, storageNotice, adoptState, pendingStart, agentPrompt, endedSummary } from "./logic.js";
+import { endedJobs, storageAlerts, shouldLead, mustAdopt, jobNotice, storageNotice, adoptState, pendingStart, agentPrompt, endedSummary,
+  projectAlerts, projectNotice } from "./logic.js";
 import { detailBlock } from "./detail.js";
 import { clusterStrip } from "./strip.js";
+import { projectsBlock } from "./projects.js";
 
 const TICK_MS = 5000;
 const SNAPSHOT_MS = 20000;
 const CLUSTER_MS = 120000;
+const PROJECTS_MS = 600000;
 const FINAL_MAX_IDS = 50;
 // More ended jobs than this on one machine in one poll get a single summary toast.
 const SUMMARY_OVER = 5;
@@ -55,6 +58,10 @@ export default class Slurm extends View {
     this.failure = null;
     this.running = null;
     this.armed = {};
+    this.projBusy = false;
+    this.lastProjects = 0;
+    this.projects = null;
+    this.projArmed = {};
     if (checking()) return;
     this.tick(cx);
     cx.timer.every(TICK_MS, (cx) => this.tick(cx));
@@ -78,19 +85,21 @@ export default class Slurm extends View {
     // ticks stalled (another copy led and notified meanwhile), not only a fresh leader.
     if (mustAdopt(this.leading, shared(LEASE), this.copy)) {
       const st = shared(STATE);
-      ({ running: this.running, armed: this.armed } = adoptState(st, now));
+      ({ running: this.running, armed: this.armed, projArmed: this.projArmed } = adoptState(st, now));
       this.snapshot = st?.snapshot ?? null;
       this.cluster = st?.cluster ?? null;
+      this.projects = st?.projects ?? null;
       this.failure = null;
       this.polled = false;
       this.lastPoll = 0;
       this.lastCluster = 0;
+      this.lastProjects = 0;
       this.leading = true;
     }
     setShared(LEASE, { copy: this.copy, at: now, watch: this.watch });
     const asked = Number(shared(REFRESH)) || 0;
     if (!this.polling && (now - this.lastPoll >= SNAPSHOT_MS || asked > this.lastPoll)) this.poll(cx);
-    else this.maybeCluster(cx);
+    else { this.maybeCluster(cx); this.maybeProjects(cx); }
   }
 
   holdsLease() {
@@ -101,10 +110,12 @@ export default class Slurm extends View {
     setShared(STATE, {
       snapshot: this.snapshot,
       cluster: this.cluster,
+      projects: this.projects,
       failure: this.failure,
       updated_at: Date.now(),
       running: this.running,
       armed: this.armed,
+      projArmed: this.projArmed,
     });
   }
 
@@ -134,6 +145,7 @@ export default class Slurm extends View {
       this.publish();
       cx.notify();
       this.maybeCluster(cx);
+      this.maybeProjects(cx);
       if (ended.length) await this.notifyEnded(ended);
     });
   }
@@ -152,11 +164,37 @@ export default class Slurm extends View {
       this.clusterBusy = false;
       if (!cl || !this.holdsLease()) return;
       this.cluster = cl;
-      const r = storageAlerts(this.armed, cl);
+      const r = storageAlerts(this.armed, cl, this.projects ?? undefined);
       this.armed = r.armed;
       this.publish();
       cx.notify();
       for (const a of r.alerts) notify(storageNotice(a));
+    });
+  }
+
+  // Projects and quotas change slowly; first right after the first snapshot, then every PROJECTS_MS.
+  maybeProjects(cx) {
+    if (this.projBusy || !this.polled || (this.lastProjects && Date.now() - this.lastProjects < PROJECTS_MS)) return;
+    this.projBusy = true;
+    this.lastProjects = Date.now();
+    cx.spawn(async (cx) => {
+      let pr = null;
+      try {
+        pr = JSON.parse((await exec(this.bin, ["projects"], { timeout: 120000 })).stdout);
+      } catch (_e) {
+        // Optional like cluster data; the next round retries.
+      }
+      this.projBusy = false;
+      if (!pr || !this.holdsLease()) return;
+      this.projects = pr;
+      const p = projectAlerts(this.projArmed, pr);
+      this.projArmed = p.armed;
+      const s = this.cluster ? storageAlerts(this.armed, this.cluster, pr) : { armed: this.armed, alerts: [] };
+      this.armed = s.armed;
+      this.publish();
+      cx.notify();
+      for (const a of p.alerts) notify(projectNotice(a));
+      for (const a of s.alerts) notify(storageNotice(a));
     });
   }
 
@@ -357,7 +395,7 @@ export default class Slurm extends View {
     return out;
   }
 
-  machine(t, m, mc) {
+  machine(t, m, mc, mp) {
     const open = !this.collapsed[m.name];
     const counts = {};
     for (const j of m.jobs) counts[j.state] = (counts[j.state] ?? 0) + 1;
@@ -370,10 +408,12 @@ export default class Slurm extends View {
       .child(div().text_size(11).text_color(t.dim).child(`${m.scheduler} · ${m.user}`))
       .child(div().flex_1())
       .child(div().text_size(11).text_color(m.error ? t.blocked : t.muted).child(summary));
-    const strip = open ? clusterStrip(t, mc) : null;
+    const strip = open ? clusterStrip(t, mc, mp) : null;
+    const projects = open ? projectsBlock(t, mp, Date.now()) : null;
     const rows = open ? this.jobRows(t, m, mc) : [];
     const body = !open ? [] : [
       ...(strip ? [strip] : []),
+      ...(projects ? [projects] : []),
       ...(m.error ? [this.note(t, `✗ ${m.error}`, t.blocked)] : []),
       ...(!m.error && rows.length === 0 ? [this.note(t, "no jobs in queue")] : []),
       ...rows,
@@ -387,6 +427,7 @@ export default class Slurm extends View {
     const st = shared(STATE);
     const d = st?.snapshot ?? null;
     const cl = st?.cluster ?? null;
+    const pr = st?.projects ?? null;
     const failure = st?.failure ?? null;
     const stamp = d?.machines?.[0]?.fetched_at;
     const refreshing = (Number(shared(REFRESH)) || 0) > (st?.updated_at ?? 0);
@@ -411,7 +452,8 @@ export default class Slurm extends View {
       body = [
         ...(d.warnings ?? []).map((w) => this.note(t, w, t.done)),
         ...(failure ? [this.note(t, `refresh failed: ${failure}`, t.blocked)] : []),
-        ...d.machines.map((m) => this.machine(t, m, cl?.machines?.find((c) => c.name === m.name) ?? null)),
+        ...d.machines.map((m) => this.machine(t, m, cl?.machines?.find((c) => c.name === m.name) ?? null,
+          pr?.machines?.find((p) => p.name === m.name) ?? null)),
       ];
     }
 
