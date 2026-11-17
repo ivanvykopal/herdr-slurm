@@ -1370,6 +1370,7 @@ fn main() {
         Some("action") => jobcmd::cmd_action(),
         Some("final") => jobcmd::cmd_final(),
         Some("cluster") => cluster::cmd_cluster(),
+        Some("projects") => projects::cmd_projects(),
         Some("start") => cmd_start(),
         Some("stop") => cmd_stop(),
         Some("daemon") => cmd_daemon(),
