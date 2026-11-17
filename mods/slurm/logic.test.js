@@ -452,3 +452,17 @@ test("mergeProjects carries quotas over an unparsed myquota poll", () => {
   p = mergeProjects(p, pr([], { perunfsusage: "x" }, null));
   assert.equal(p.machines[0].projects[0].storage.pct, 50);
 });
+
+import { projectsSummary } from "./logic.js";
+
+test("projectsSummary counts active projects and those at or above 90 %", () => {
+  const mp = { projects: [
+    { account: "a", cpu: { used: 10, awarded: 100 }, gpu: { used: 95, awarded: 100 }, storage: null },
+    { account: "b", cpu: { used: 1, awarded: 100 }, gpu: { used: null, awarded: null }, storage: { pct: 98 } },
+    { account: "c", cpu: { used: 1, awarded: 100 }, gpu: { used: 1, awarded: 100 }, storage: { pct: 10 } },
+  ] };
+  assert.deepEqual(projectsSummary(mp), { text: "3 active · 2 at ≥90%", warn: true });
+  assert.deepEqual(projectsSummary({ projects: [mp.projects[2]] }), { text: "1 active", warn: false });
+  assert.deepEqual(projectsSummary({ projects: [] }), { text: "none active", warn: false });
+  assert.deepEqual(projectsSummary({ error: "boom" }), { text: "unavailable", warn: true });
+});
