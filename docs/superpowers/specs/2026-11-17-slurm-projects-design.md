@@ -1,6 +1,7 @@
 # Slurm projects, compute hours and quotas: design
 
-Date: 2026-11-17. Status: design approved in chat; awaiting spec review.
+Date: 2026-11-17. Status: implemented on `feat/slurm-projects`; the
+corrections marked *Implemented:* record where the code differs.
 Builds on `docs/superpowers/specs/2026-11-17-slurm-mod-extensions-design.md`
 (merged to `main` in d7ce97a). Method borrowed from
 `perun/slurm-monitor/src-tauri/src/projects.rs`.
@@ -100,7 +101,9 @@ Field rules:
   Active = not expired by assoc `node=0`, and, when `sprojects` parsed, listed
   under ACTIVE PROJECTS; when `perunfsusage` parsed, not marked `inactive`.
 - `source`: `"sprojects"` when sprojects parsed (its CPU/GPU used/awarded
-  replace the sreport/QOS numbers), else `"sreport"`.
+  replace the sreport/QOS numbers), else `"sreport"`. *Implemented:* only
+  when the parsed sprojects table has at least one awarded CPU or GPU value;
+  otherwise `"sreport"`, and the sprojects text goes to `raw.sprojects`.
 - `cpu`/`gpu`: `used`, `awarded` in hours (integers, rounded); `awarded`
   from QOS `GrpTRESMins` minutes / 60 (`cpu=`, `gres/gpu=`; `gres/gpu:<type>=`
   summed), `null` when no cap is found. `used` = account-total sreport row;
@@ -109,9 +112,13 @@ Field rules:
   likewise from `sreport30` account totals, `null` when absent. `mine` = your
   own per-user row in `sreport30`, `null` when absent. Absent sreport rows for
   an account that sshare lists mean 0 usage only when the section itself
-  parsed (sreport omits zero rows).
+  parsed (sreport omits zero rows). *Implemented:* on Devana the 30-day
+  report returns no rows at all, so `used_30d` and `mine` are `null` there
+  and the panel shows no `you:` line and no days-left estimate.
 - `title`: from `perunfsusage` indented title line, else `null`.
 - `storage`: the project's quota row (`perunfsusage` Project row) else `null`.
+  *Implemented:* also `null` when that row's limit is `TBD`; the row still
+  decides active / inactive.
 - `quotas`: user quota rows from `myquota` / `perunfsusage` (`kind: "user"`).
   Sizes are parsed from `KB`, `MB`, `GB`, `TB` (powers of 1024) into KiB.
   `limit` `TBD` or missing → row dropped.
@@ -131,6 +138,10 @@ its quota today, so it shows `ansi3` and alerts once it reaches 90 %).
 
 - `projects` is polled by the leader every 600 s (first right after the
   first snapshot) and published in `shared("slurm.state").projects`.
+  *Implemented:* each result is merged over the last good one (a top-level
+  `error` keeps the previous result, a machine entry with `error` keeps its
+  previous entry), so a failed poll neither drops quota % from the strip nor
+  re-arms quota alerts.
 - Per machine, under the cluster strip: a **Projects** block, one row per
   active project: `account` (and `title`, dim, truncated), then two bars
   `CPU used/awarded h` and `GPU used/awarded h` (colors by % like storage:
@@ -138,7 +149,9 @@ its quota today, so it shows `ansi3` and alerts once it reaches 90 %).
   `used h`), then `you: <mine> GPU h (30 d)` when `mine` present, then a burn
   line `~<N> days left at the 30-day rate` when `awarded`, `used` and
   `used_30d` > 0 are known (N = (awarded − used) / (used_30d / 30), floor; `∞`
-  hidden), then the project storage bar when present.
+  hidden), then the project storage bar when present. *Implemented:* one
+  burn line per kind, prefixed `CPU ` or `GPU `
+  (`GPU ~325 days left at the 30-day rate`), shown only while hours remain.
 - Collapsed with the machine section. Empty state: `no active projects`.
   When `raw` is set for a tool and nothing parsed: a dim `could not read
   <tool>` line with the first 5 raw lines.
