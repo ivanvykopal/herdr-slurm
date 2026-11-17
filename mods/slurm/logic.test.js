@@ -285,3 +285,67 @@ test("endedSummary groups many ended jobs into one toast", () => {
   assert.equal(endedSummary("P", [{ level: "success", state: "COMPLETED" }, { level: "warning", state: "UNKNOWN" }]).level, "warning");
   assert.equal(endedSummary("P", [{ level: "success", state: "COMPLETED" }]).level, "success");
 });
+
+import { quotaFor, mergedStoragePct, burnDays, hoursPct, projectAlerts, projectNotice } from "./logic.js";
+
+const mp = { name: "a", error: null, quotas: [
+  { kind: "project", name: "p", path: "/mnt/data/", used_kb: 1, limit_kb: 2, pct: 70 },
+  { kind: "project", name: "q", path: "/mnt/data/proj", used_kb: 1, limit_kb: 2, pct: 95 },
+] };
+
+test("quota merge matches path prefix on segment boundary", () => {
+  assert.deepEqual(quotaFor(mp, "/mnt/data/proj"), { pct: 95, quota: true });
+  assert.deepEqual(quotaFor(mp, "/mnt/data/proj/x"), { pct: 95, quota: true });
+  assert.deepEqual(quotaFor(mp, "/mnt/data/projx"), { pct: 70, quota: true });
+  assert.equal(quotaFor(mp, "/mnt/database"), null);
+  assert.equal(quotaFor(null, "/mnt/data"), null);
+  assert.deepEqual(mergedStoragePct({ path: "/mnt/data/proj", pct: 10 }, mp), { pct: 95, quota: true });
+});
+
+test("quota merge keeps fs pct for unmatched path", () => {
+  assert.deepEqual(mergedStoragePct({ path: "/home", pct: 42 }, mp), { pct: 42, quota: false });
+  assert.deepEqual(mergedStoragePct({ path: "/home", pct: 42 }, undefined), { pct: 42, quota: false });
+});
+
+test("burnDays basic", () => {
+  assert.equal(burnDays({ used: 100, awarded: 1000, used_30d: 300 }), 90);
+  assert.equal(burnDays({ used: 1000, awarded: 1000, used_30d: 300 }), null);
+});
+
+test("burnDays null without 30d usage", () => {
+  assert.equal(burnDays({ used: 1, awarded: 10, used_30d: 0 }), null);
+  assert.equal(burnDays({ used: 1, awarded: 10, used_30d: null }), null);
+  assert.equal(burnDays(null), null);
+});
+
+test("hoursPct null without award", () => {
+  assert.equal(hoursPct({ used: 5, awarded: null }), null);
+  assert.equal(hoursPct({ used: 5, awarded: 0 }), null);
+  assert.equal(hoursPct({ used: null, awarded: 10 }), null);
+  assert.equal(hoursPct({ used: 1, awarded: 3 }), 33);
+});
+
+test("project alert fires at 90 once and re-arms below 85", () => {
+  const st = (used, error = null) => ({ machines: [{ name: "a", error, projects: [
+    { account: "acc", cpu: { used, awarded: 100 }, gpu: { used: null, awarded: null } },
+  ] }] });
+  let r = projectAlerts(null, st(90));
+  assert.deepEqual(r.alerts, [{ machine: "a", account: "acc", kind: "CPU", pct: 90 }]);
+  r = projectAlerts(r.armed, st(95));
+  assert.deepEqual(r.alerts, []);
+  r = projectAlerts(r.armed, st(50, "boom"));
+  assert.equal(r.armed["a:acc:CPU"], false);
+  r = projectAlerts(r.armed, st(86));
+  assert.equal(r.armed["a:acc:CPU"], false);
+  r = projectAlerts(r.armed, st(84));
+  assert.equal(r.armed["a:acc:CPU"], true);
+  assert.equal("a:acc:GPU" in r.armed, false);
+  r = projectAlerts(r.armed, st(91));
+  assert.equal(r.alerts.length, 1);
+});
+
+test("projectNotice text", () => {
+  assert.deepEqual(projectNotice({ machine: "a", account: "acc", kind: "GPU", pct: 92 }), {
+    title: "a: acc GPU hours 92% used", body: "Ask the PI for more hours or slow down.", level: "warning",
+  });
+});
