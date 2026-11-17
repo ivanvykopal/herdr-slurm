@@ -70,6 +70,7 @@ scheduler_user = "queue-user"
 # scheduler_command = "/path/to/squeue" # optional; executable only
 # ssh_user = "login-user"   # optional; prefer ~/.ssh/config
 # session = "agents"        # herdr session on the cluster; default if omitted
+# slurm_conf = "~/slurm-custom/slurm/custom_slurm.conf" # optional; exported as SLURM_CONF
 ```
 
 `scheduler_user` selects the jobs shown. `ssh_user`, when set, controls only
@@ -114,6 +115,33 @@ remote query is terminated after 15 seconds.
 Scheduler capture retains at most 8 MiB of stdout and 1 MiB of stderr while
 continuing to drain both streams, then reports oversized output as an error.
 
+`storage` (optional) lists remote paths whose disk use the desktop mod's
+cluster strip shows (`herdr-slurm cluster`):
+
+```toml
+storage = ["$HOME", "/mnt/scratch", "/project/my-proj"]
+```
+
+Each path must be non-empty, use only `[A-Za-z0-9_./~$-]`, and contain no
+`..` segment; `$HOME`/`$USER` and a leading `~` expand on the cluster. An
+invalid path skips the machine with a warning. When omitted, the defaults are
+`$HOME`, `/scratch`, `/mnt/scratch` and `/project` (missing paths are skipped).
+
+`slurm_conf` (optional) points the remote Slurm tools at another config file.
+Some clusters refuse `sacctmgr` and `sreport` under the default config, and
+`herdr-slurm projects` needs both:
+
+```toml
+slurm_conf = "~/slurm-custom/slurm/custom_slurm.conf"
+```
+
+When set, every remote script for that machine (the job query behind the
+pane, the daemon and `snapshot`, plus `job`, `action`, `final`, `cluster` and
+`projects`) starts with `export SLURM_CONF="<value>"; `, with a leading `~`
+rewritten to `$HOME`. The value follows the `storage` path rules; an invalid
+one skips the machine with `invalid slurm_conf '<value>'`. Machines without
+the key run exactly the commands they ran before.
+
 ## Actions
 
 | Action | What it does |
@@ -131,10 +159,30 @@ command = "ivan.herdr-slurm.open-windows" # use ...open on linux/macos
 description = "Scheduler jobs sidebar"
 ```
 
+## Subcommands
+
+| Command | What it does |
+|---|---|
+| `herdr-slurm` (no argument) | Interactive job table for a herdr pane |
+| `herdr-slurm open` | Open/focus the jobs sidebar pane |
+| `herdr-slurm refresh` | One-shot snapshot of every machine, printed as text |
+| `herdr-slurm snapshot` | Poll every machine once in parallel, print one JSON document |
+| `herdr-slurm job <machine> <id> [--lines N] [--gpu]` | One job as JSON: state, allocation, log paths and tails (N lines, default 50, max 500), step usage; `--gpu` adds live GPU use |
+| `herdr-slurm action <machine> <id> <cancel\|requeue\|hold\|release>` | Run `scancel`/`scontrol` (Slurm) or `qdel`/`qrerun`/`qhold`/`qrls` (PBS) and print `{error, ok, output}` |
+| `herdr-slurm final <machine> <id>...` | Final state and exit code of up to 50 ended jobs; unresolved ids give `UNKNOWN` |
+| `herdr-slurm cluster` | Per machine: free/total GPUs per partition, pending start estimates, storage use and quota |
+| `herdr-slurm projects` | Per Slurm machine: active projects (accounts) with CPU/GPU hours used and awarded, 30-day use, your own 30-day GPU hours, project storage quota, and your user storage quotas |
+| `herdr-slurm start` / `stop` | Start / stop the background sidebar-token daemon |
+| `herdr-slurm daemon` | The daemon itself (spawned by `start`) |
+
 ## Notes
 
 - Slurm data comes from `squeue`; PBS data comes from `qstat`. Historical jobs
   are not shown.
+- `projects` reads `sshare`, `sacctmgr` and `sreport`, plus the site tools
+  `sprojects`, `myquota` and `perunfsusage` where the cluster has them (one
+  ssh per machine, 60 s cap). PBS machines report `"unsupported": "pbs"`.
+  [RECIPE.md](RECIPE.md) lists the fields and where each comes from.
 - Requirements: Rust toolchain (to build), OpenSSH client on PATH, and either
   `squeue` or JSON-capable `qstat` on each remote cluster.
 
@@ -150,7 +198,7 @@ in parallel and prints one JSON document. See [RECIPE.md](RECIPE.md).
 Install:
 
 ```sh
-cargo install --path .                      # puts herdr-slurm on PATH
+cargo install --path . --locked             # puts herdr-slurm (with job/action/final/cluster/projects) on PATH
 cp -R mods/slurm ~/.config/herdr-app/mods/
 herdr-app check ~/.config/herdr-app/mods/slurm
 ```
@@ -165,4 +213,7 @@ to your layout's `panel-body` stack and a top-bar button that runs
 `--props '{"bin":"C:\\path\\herdr-slurm.exe"}'`.
 
 It polls every 20 s, has a Refresh button, folds per machine, and drops columns
-below 640/420 px. Unreachable clusters and config errors show inline.
+below 640/420 px. Unreachable clusters and config errors show inline. Under
+each open Slurm machine it shows GPU headroom, storage bars (with your quota %
+where a quota tool reports one) and a Projects block with compute hours, and
+it notifies when an award or a quota reaches 90 %.
