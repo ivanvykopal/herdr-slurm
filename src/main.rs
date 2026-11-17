@@ -107,7 +107,7 @@ const TEMPLATE: &str = r#"# herdr scheduler machines. One [[machine]] block per 
 # `session` (optional) is the herdr session on the cluster whose workspaces
 # get the sidebar token; omit it for the default session.
 # `storage` (optional) lists remote paths whose disk usage is shown, e.g.
-# storage = ["$HOME", "/mnt/scratch"]; "$HOME" may only lead a path.
+# storage = ["$HOME", "/mnt/scratch"]; `$HOME`/`$USER` expand on the cluster.
 
 [[machine]]
 name = "MyCluster"
@@ -298,24 +298,19 @@ fn parse_machine_entry(entry: &toml::Value) -> Result<Machine, String> {
     })
 }
 
-/// `storage` paths land in a remote shell command: absolute paths (or
-/// `$HOME`-prefixed) of plain path characters, without `..` components.
+/// `storage` paths land in a remote shell command: non-empty, only
+/// `[A-Za-z0-9_./~$-]`, without `..` components (`$HOME`/`$USER` expand remotely).
 fn parse_storage(value: &toml::Value) -> Result<Vec<String>, String> {
     let invalid = |p: &str| format!("invalid storage path '{p}'");
     let list = value.as_array().ok_or_else(|| invalid(&value.to_string()))?;
     let mut out = Vec::with_capacity(list.len());
     for item in list {
         let p = item.as_str().ok_or_else(|| invalid(&item.to_string()))?;
-        let rest = match p.strip_prefix("$HOME") {
-            Some(r) if r.is_empty() || r.starts_with('/') => r,
-            Some(_) => return Err(invalid(p)),
-            None if p.starts_with('/') => p,
-            None => return Err(invalid(p)),
-        };
-        if !rest
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '_' | '-' | '.'))
-            || rest.split('/').any(|seg| seg == "..")
+        if p.is_empty()
+            || !p.chars().all(|c| {
+                c.is_ascii_alphanumeric() || matches!(c, '/' | '_' | '-' | '.' | '~' | '$')
+            })
+            || p.split('/').any(|seg| seg == "..")
         {
             return Err(invalid(p));
         }
@@ -1396,10 +1391,17 @@ user = "sam"
             parsed.warnings,
             ["skipping machine 'X': invalid storage path '/a/../b'"]
         );
-        for bad in [r#"storage = "/a""#, "storage = [1]", r#"storage = ["/a;rm"]"#, r#"storage = ["$HOMEx"]"#] {
+        for bad in [r#"storage = "/a""#, "storage = [1]", r#"storage = ["/a;rm"]"#, r#"storage = [""]"#] {
             let entry: toml::Value =
                 toml::from_str(&format!("host = \"h\"\nuser = \"u\"\n{bad}")).unwrap();
             assert!(parse_machine_entry(&entry).is_err(), "{bad}");
+        }
+        for good in ["/scratch/$USER", "~/x", "$HOMEx"] {
+            let entry: toml::Value = toml::from_str(&format!(
+                "host = \"h\"\nuser = \"u\"\nstorage = [\"{good}\"]"
+            ))
+            .unwrap();
+            assert_eq!(parse_machine_entry(&entry).unwrap().storage, [good], "{good}");
         }
     }
 
