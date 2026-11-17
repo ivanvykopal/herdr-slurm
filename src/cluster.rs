@@ -81,7 +81,7 @@ fn aggregate_gpus(sinfo: &str) -> Vec<PartitionGpus> {
         }
         let part = f[1].trim_end_matches('*');
         let state = f[4].to_ascii_lowercase();
-        let unavailable = ["down", "drain", "fail", "maint", "resv"]
+        let unavailable = ["down", "drain", "drng", "fail", "maint", "resv"]
             .iter()
             .any(|s| state.contains(s));
         let used = parse_gres(f[3]);
@@ -107,8 +107,8 @@ fn aggregate_gpus(sinfo: &str) -> Vec<PartitionGpus> {
             };
             let p = &mut out[idx];
             p.total += total;
+            p.used += u;
             if !unavailable {
-                p.used += u;
                 p.free += total - u;
             }
         }
@@ -320,6 +320,12 @@ mod tests {
     #[test]
     fn gpus_untyped_perun() {
         assert_eq!(aggregate_gpus("gpu03|gpu_short|gpu:8|gpu:6|mix-|"), vec![pg("gpu_short", "", 8, 6, 2)]);
+    }
+
+    #[test]
+    fn draining_node_not_free() {
+        let s = "n151|gpu|gpu:a100-sxm4:4|gpu:a100-sxm4:1(IDX:0)|drng|";
+        assert_eq!(aggregate_gpus(s), vec![pg("gpu", "a100-sxm4", 4, 1, 0)]);
     }
 
     #[test]
