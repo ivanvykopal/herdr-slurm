@@ -32,6 +32,7 @@ struct Machine {
     ssh_user: Option<String>,
     session: String, // herdr session on the cluster to report to; "" = default
     storage: Vec<String>, // remote paths for disk-usage bars; [] = defaults
+    slurm_conf: Option<String>, // exported as SLURM_CONF before every remote script
 }
 
 impl Machine {
@@ -109,6 +110,8 @@ const TEMPLATE: &str = r#"# herdr scheduler machines. One [[machine]] block per 
 # get the sidebar token; omit it for the default session.
 # `storage` (optional) lists remote paths whose disk usage is shown, e.g.
 # storage = ["$HOME", "/mnt/scratch"]; `$HOME`/`$USER` expand on the cluster.
+# `slurm_conf` (optional) is exported as SLURM_CONF before every remote command,
+# e.g. slurm_conf = "~/slurm-custom/slurm/custom_slurm.conf".
 
 [[machine]]
 name = "MyCluster"
@@ -287,6 +290,16 @@ fn parse_machine_entry(entry: &toml::Value) -> Result<Machine, String> {
         None => Vec::new(),
         Some(value) => parse_storage(value)?,
     };
+    let slurm_conf = match entry.get("slurm_conf") {
+        None => None,
+        Some(value) => match value.as_str() {
+            Some(p) if valid_remote_path(p) => Some(p.to_string()),
+            _ => {
+                let shown = value.as_str().map_or_else(|| value.to_string(), str::to_string);
+                return Err(format!("invalid slurm_conf '{shown}'"));
+            }
+        },
+    };
     Ok(Machine {
         name: g("name"),
         host,
@@ -296,23 +309,28 @@ fn parse_machine_entry(entry: &toml::Value) -> Result<Machine, String> {
         ssh_user,
         session,
         storage,
+        slurm_conf,
     })
 }
 
-/// `storage` paths land in a remote shell command: non-empty, only
+/// Remote paths land in a remote shell command: non-empty, only
 /// `[A-Za-z0-9_./~$-]`, without `..` components (`$HOME`/`$USER` expand remotely).
+fn valid_remote_path(p: &str) -> bool {
+    !p.is_empty()
+        && p.chars().all(|c| {
+            c.is_ascii_alphanumeric() || matches!(c, '/' | '_' | '-' | '.' | '~' | '$')
+        })
+        && !p.split('/').any(|seg| seg == "..")
+}
+
+/// `storage` paths: each must pass `valid_remote_path`.
 fn parse_storage(value: &toml::Value) -> Result<Vec<String>, String> {
     let invalid = |p: &str| format!("invalid storage path '{p}'");
     let list = value.as_array().ok_or_else(|| invalid(&value.to_string()))?;
     let mut out = Vec::with_capacity(list.len());
     for item in list {
         let p = item.as_str().ok_or_else(|| invalid(&item.to_string()))?;
-        if p.is_empty()
-            || !p.chars().all(|c| {
-                c.is_ascii_alphanumeric() || matches!(c, '/' | '_' | '-' | '.' | '~' | '$')
-            })
-            || p.split('/').any(|seg| seg == "..")
-        {
+        if !valid_remote_path(p) {
             return Err(invalid(p));
         }
         out.push(p.to_string());
@@ -323,12 +341,13 @@ fn parse_storage(value: &toml::Value) -> Result<Vec<String>, String> {
 // -------------------------------------------------------------------- data --
 
 fn remote_command(machine: &Machine) -> String {
+    let prelude = remote::prelude(machine);
     match machine.scheduler {
         Scheduler::Slurm => format!(
-            "{} -u {} -h -o '{SQUEUE_FMT}'",
+            "{prelude}{} -u {} -h -o '{SQUEUE_FMT}'",
             machine.scheduler_command, machine.scheduler_user
         ),
-        Scheduler::Pbs => format!("{} -f -F json", machine.scheduler_command),
+        Scheduler::Pbs => format!("{prelude}{} -f -F json", machine.scheduler_command),
     }
 }
 
@@ -1410,6 +1429,76 @@ user = "sam"
         }
     }
 
+    fn conf_machine(extra: &str) -> Machine {
+        let entry: toml::Value =
+            toml::from_str(&format!("name = \"P\"\nhost = \"h\"\nscheduler_user = \"u\"\n{extra}"))
+                .unwrap();
+        parse_machine_entry(&entry).unwrap()
+    }
+
+    const CONF: &str = "slurm_conf = \"~/slurm-custom/slurm/custom_slurm.conf\"";
+    const PRELUDE: &str = "export SLURM_CONF=\"$HOME/slurm-custom/slurm/custom_slurm.conf\"; ";
+
+    #[test]
+    fn slurm_conf_parses_and_validates() {
+        let m = conf_machine(CONF);
+        assert_eq!(
+            m.slurm_conf.as_deref(),
+            Some("~/slurm-custom/slurm/custom_slurm.conf")
+        );
+        assert_eq!(conf_machine("").slurm_conf, None);
+        for bad in ["/a/../b", "x;y"] {
+            let parsed = parse_machines(&format!(
+                "[[machine]]\nname = \"X\"\nhost = \"x\"\nuser = \"sam\"\nslurm_conf = \"{bad}\"\n\
+                 [[machine]]\nname = \"Ok\"\nhost = \"ok\"\nuser = \"sam\"\n"
+            ))
+            .unwrap();
+            assert_eq!(parsed.machines.len(), 1);
+            assert_eq!(
+                parsed.warnings,
+                [format!("skipping machine 'X': invalid slurm_conf '{bad}'")]
+            );
+        }
+    }
+
+    #[test]
+    fn prelude_rewrites_tilde() {
+        assert_eq!(remote::prelude(&conf_machine(CONF)), PRELUDE);
+        assert_eq!(remote::prelude(&conf_machine("")), "");
+    }
+
+    fn all_scripts(m: &Machine) -> Vec<String> {
+        vec![
+            remote_command(m),
+            jobcmd::build_job_script(m, "123", 50, true),
+            jobcmd::action_command(m, "123", "hold").unwrap(),
+            jobcmd::build_final_script(m, &["123".to_string()]),
+            cluster::build_cluster_script(m),
+        ]
+    }
+
+    #[test]
+    fn scripts_start_with_prelude() {
+        for s in all_scripts(&conf_machine(CONF)) {
+            assert!(s.starts_with(PRELUDE), "{s}");
+        }
+    }
+
+    #[test]
+    fn scripts_unchanged_without_slurm_conf() {
+        let m = conf_machine("");
+        for s in all_scripts(&m) {
+            assert!(!s.starts_with("export SLURM_CONF"), "{s}");
+        }
+        assert_eq!(remote_command(&m), format!("squeue -u u -h -o '{SQUEUE_FMT}'"));
+        assert_eq!(jobcmd::action_command(&m, "123", "hold").as_deref(), Some("scontrol hold 123"));
+        assert_eq!(
+            jobcmd::build_final_script(&m, &["123".to_string()]),
+            "echo '@@herdr:sc:123@@'\nscontrol show job -o 123 2>/dev/null\n\
+             echo '@@herdr:sacct@@'\nsacct -n -X -P -j 123 -o JobID,State,ExitCode 2>/dev/null\n"
+        );
+    }
+
     #[test]
     fn snapshot_includes_ssh_target() {
         let entry: toml::Value =
@@ -1878,6 +1967,7 @@ scheduler_command = "{command}"
             ssh_user: None,
             session: String::new(),
             storage: Vec::new(),
+            slurm_conf: None,
         };
         let pbs = Machine {
             scheduler: Scheduler::Pbs,
@@ -1946,6 +2036,7 @@ session = "{session}"
             ssh_user: None,
             session: "agents".into(),
             storage: Vec::new(),
+            slurm_conf: None,
         };
         let default_machine = Machine {
             session: String::new(),

@@ -6,7 +6,7 @@ use std::time::Duration;
 use serde_json::{json, Value};
 
 use crate::remote::{
-    find_machine, load_parsed, print_json, run_remote, sections, tool, valid_job_id,
+    find_machine, load_parsed, prelude, print_json, run_remote, sections, tool, valid_job_id,
 };
 use crate::{normalize_pbs_state, sanitize_display_text, truncate, Machine, Scheduler};
 
@@ -113,7 +113,13 @@ fn parse_gpu_lines(text: &str) -> Vec<GpuUse> {
 
 /// One remote shell script printing `@@herdr:<section>@@` blocks. `id` must
 /// already have passed `valid_job_id`; log paths are double-quoted.
-fn build_job_script(m: &Machine, id: &str, lines: u32, gpu: bool) -> String {
+pub(crate) fn build_job_script(m: &Machine, id: &str, lines: u32, gpu: bool) -> String {
+    let mut s = prelude(m);
+    s.push_str(&job_script_body(m, id, lines, gpu));
+    s
+}
+
+fn job_script_body(m: &Machine, id: &str, lines: u32, gpu: bool) -> String {
     let tails = format!(
         "echo '@@herdr:out@@'\n\
          if [ -n \"$o\" ]; then tail -n {lines} \"$o\" 2>/dev/null || echo \"(cannot read $o)\"; fi\n\
@@ -362,7 +368,7 @@ pub fn cmd_job() {
 
 /// Remote command for an `action` verb, or `None` for an unknown verb.
 /// `id` must already have passed `valid_job_id`.
-fn action_command(m: &Machine, id: &str, verb: &str) -> Option<String> {
+pub(crate) fn action_command(m: &Machine, id: &str, verb: &str) -> Option<String> {
     let (name, sub) = match (&m.scheduler, verb) {
         (Scheduler::Slurm, "cancel") => ("scancel", ""),
         (Scheduler::Slurm, "requeue") => ("scontrol", " requeue"),
@@ -379,7 +385,7 @@ fn action_command(m: &Machine, id: &str, verb: &str) -> Option<String> {
         Scheduler::Slurm => id.to_string(),
         Scheduler::Pbs => format!("'{id}'"),
     };
-    Some(format!("{}{sub} {id}", tool(m, name)))
+    Some(format!("{}{}{sub} {id}", prelude(m), tool(m, name)))
 }
 
 const ACTION_USAGE: &str = "usage: herdr-slurm action <machine> <id> <cancel|requeue|hold|release>";
@@ -503,7 +509,13 @@ fn parse_final_pbs(text: &str, ids: &[String]) -> Vec<FinalJob> {
         .collect()
 }
 
-fn build_final_script(m: &Machine, ids: &[String]) -> String {
+pub(crate) fn build_final_script(m: &Machine, ids: &[String]) -> String {
+    let mut s = prelude(m);
+    s.push_str(&final_script_body(m, ids));
+    s
+}
+
+fn final_script_body(m: &Machine, ids: &[String]) -> String {
     match m.scheduler {
         Scheduler::Slurm => {
             let scontrol = tool(m, "scontrol");

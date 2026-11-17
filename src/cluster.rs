@@ -179,8 +179,8 @@ fn storage_paths(m: &Machine) -> Vec<String> {
 /// One script with sections `sinfo`, `pending` (Slurm), `st:<n>` per storage
 /// path and `end`. Paths were validated at config load; a leading `~` is
 /// rewritten to `$HOME` and each path is double-quoted so variables expand.
-fn build_cluster_script(m: &Machine) -> String {
-    let mut s = String::new();
+pub(crate) fn build_cluster_script(m: &Machine) -> String {
+    let mut s = crate::remote::prelude(m);
     if m.scheduler == Scheduler::Slurm {
         s.push_str(&format!(
             "echo '@@herdr:sinfo@@'\n{} -N -h -O 'NodeHost:|,Partition:|,Gres:|,GresUsed:|,StateCompact:|' 2>/dev/null\n\
