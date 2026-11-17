@@ -126,3 +126,91 @@ export function adoptState(state, now) {
   }
   return { running: null, armed: {} };
 }
+
+// Action bar of an expanded job, in display order.
+export function jobButtons({ scheduler, state, allocGpus }) {
+  const keys = ["cancel", "requeue", "hold", "release"];
+  const slurmRunning = scheduler === "slurm" && state === "RUNNING";
+  if (slurmRunning) keys.push("terminal");
+  keys.push("agent");
+  if (slurmRunning && allocGpus > 0) keys.push("gpu");
+  return keys;
+}
+
+// Cancel and requeue ask first; hold and release run at once (null).
+export function confirmText(verb, id) {
+  if (verb === "cancel") return `Cancel job ${id}?`;
+  if (verb === "requeue") return `Requeue job ${id}?`;
+  return null;
+}
+
+export function factsLine(d, now) {
+  const parts = [];
+  if (d?.node_list) parts.push(d.node_list);
+  const start = formatStart(d?.start_time, now);
+  if (start) parts.push(`start ${start}`);
+  const a = d?.alloc;
+  if (a?.cpus) parts.push(`${a.cpus} cpus`);
+  if (a?.mem) parts.push(a.mem);
+  if (a?.gpus > 0) parts.push(`${a.gpus} GPU`);
+  for (const s of d?.steps ?? []) parts.push(`${s.step} ${s.ave_cpu || "-"} / ${s.max_rss || "-"}`);
+  return parts.join(" · ");
+}
+
+export function gpuChip(g) {
+  return `${g.node}#${g.index} ${g.util}% ${Math.round(g.mem_used_mib / 1024)}/${Math.round(g.mem_total_mib / 1024)}G`;
+}
+
+export function partitionLabel(p) {
+  return `${p.name}${p.gpu_type ? " " + p.gpu_type : ""} ${p.gpus_free}/${p.gpus_total} free`;
+}
+
+export function partitionColorKey(p) {
+  return p.gpus_free > 0 ? "ansi2" : "muted";
+}
+
+export function storageLabel(s) {
+  return `${s.path} ${storagePct(s)}%`;
+}
+
+// Expected start of a pending job from `cluster.pending`, or null when unknown.
+export function pendingStart(clusterMachine, id, now) {
+  const p = (clusterMachine?.pending ?? []).find((e) => String(e.id) === String(id));
+  const when = p ? formatStart(p.start, now) : "";
+  return when ? `starts ~${when}` : null;
+}
+
+const LOG_LINES = 50;
+
+export function logTabs(d) {
+  return d?.err_tail?.length ? ["out", "err"] : ["out"];
+}
+
+// Chronological (newest last), at most LOG_LINES; an unavailable err tab shows out.
+export function logLines(d, tab) {
+  const tail = tab === "err" && d?.err_tail?.length ? d.err_tail : d?.out_tail ?? [];
+  return tail.slice(-LOG_LINES);
+}
+
+export function agentPrompt({ machine, ssh_target, id, state, name, stdout, stderr, out_tail, err_tail }) {
+  const block = (tail) => (tail?.length ? tail.slice(-LOG_LINES).join("\n") : "(empty)");
+  return [
+    `Slurm job ${id} on ${machine} (ssh target: ${ssh_target})`,
+    `Name: ${name || "-"}`,
+    `State: ${state || "-"}`,
+    `Stdout: ${stdout || "-"}`,
+    `Stderr: ${stderr || "-"}`,
+    "",
+    `Last ${LOG_LINES} lines of stdout:`,
+    "```",
+    block(out_tail),
+    "```",
+    "",
+    `Last ${LOG_LINES} lines of stderr${err_tail?.length ? "" : " (same file as stdout or empty)"}:`,
+    "```",
+    block(err_tail),
+    "```",
+    "",
+    `Diagnose why this Slurm job failed or is misbehaving. Use ssh ${ssh_target} to read more of the logs.`,
+  ].join("\n");
+}

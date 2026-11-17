@@ -3,6 +3,8 @@ import assert from "node:assert/strict";
 import {
   endedJobs, notifyLevel, gpuUnderuse, storageColorKey, storagePct,
   storageAlerts, formatStart, shouldLead, jobNotice, storageNotice, adoptState, mustAdopt,
+  jobButtons, confirmText, factsLine, gpuChip, partitionLabel, partitionColorKey, storageLabel,
+  pendingStart, logTabs, logLines, agentPrompt,
 } from "./logic.js";
 
 const job = (id, state, name = "j" + id) => ({ id, name, state });
@@ -157,4 +159,109 @@ test("mustAdopt when not leading or lease held by another copy", () => {
   // Watcher stalled; a panel copy took the lease meanwhile: re-adopt its maps.
   assert.equal(mustAdopt(true, { copy: "panel", at: 1 }, "me"), true);
   assert.equal(mustAdopt(true, { copy: "me", at: 1 }, "me"), false);
+});
+
+test("jobButtons: running Slurm job with GPUs has everything", () => {
+  assert.deepEqual(jobButtons({ scheduler: "slurm", state: "RUNNING", allocGpus: 4 }),
+    ["cancel", "requeue", "hold", "release", "terminal", "agent", "gpu"]);
+});
+
+test("jobButtons: running Slurm job without GPUs has no GPU usage", () => {
+  assert.deepEqual(jobButtons({ scheduler: "slurm", state: "RUNNING", allocGpus: 0 }),
+    ["cancel", "requeue", "hold", "release", "terminal", "agent"]);
+});
+
+test("jobButtons: pending Slurm job has no terminal or GPU usage", () => {
+  assert.deepEqual(jobButtons({ scheduler: "slurm", state: "PENDING", allocGpus: 4 }),
+    ["cancel", "requeue", "hold", "release", "agent"]);
+});
+
+test("jobButtons: PBS never has terminal or GPU usage", () => {
+  assert.deepEqual(jobButtons({ scheduler: "pbs", state: "RUNNING", allocGpus: 2 }),
+    ["cancel", "requeue", "hold", "release", "agent"]);
+});
+
+test("confirmText asks only for cancel and requeue", () => {
+  assert.equal(confirmText("cancel", "123"), "Cancel job 123?");
+  assert.equal(confirmText("requeue", "123"), "Requeue job 123?");
+  assert.equal(confirmText("hold", "123"), null);
+  assert.equal(confirmText("release", "123"), null);
+});
+
+test("factsLine joins nodes, start, alloc and steps", () => {
+  const now = new Date(2026, 10, 17, 12, 0);
+  const d = {
+    node_list: "n141", start_time: "2026-11-17T10:02:11",
+    alloc: { cpus: 16, mem: "64G", gpus: 4 },
+    steps: [{ step: "123.batch", ave_cpu: "01:02:03", max_rss: "12G" }],
+  };
+  assert.equal(factsLine(d, now), "n141 · start 10:02 · 16 cpus · 64G · 4 GPU · 123.batch 01:02:03 / 12G");
+});
+
+test("factsLine skips missing parts and zero GPUs", () => {
+  const now = new Date(2026, 10, 17, 12, 0);
+  const d = { node_list: "", start_time: "Unknown", alloc: { cpus: 2, mem: "4G", gpus: 0 }, steps: [] };
+  assert.equal(factsLine(d, now), "2 cpus · 4G");
+  assert.equal(factsLine({}, now), "");
+});
+
+test("gpuChip shows util and memory in GiB", () => {
+  assert.equal(gpuChip({ node: "n141", index: 0, util: 97, mem_used_mib: 30000, mem_total_mib: 40960 }), "n141#0 97% 29/40G");
+});
+
+test("partition chip text and color", () => {
+  assert.equal(partitionLabel({ name: "gpu", gpu_type: "a100-sxm4", gpus_free: 11, gpus_total: 32 }), "gpu a100-sxm4 11/32 free");
+  assert.equal(partitionLabel({ name: "gpu_long", gpu_type: "", gpus_free: 0, gpus_total: 208 }), "gpu_long 0/208 free");
+  assert.equal(partitionColorKey({ gpus_free: 1 }), "ansi2");
+  assert.equal(partitionColorKey({ gpus_free: 0 }), "muted");
+});
+
+test("storageLabel uses the higher of filesystem and quota percent", () => {
+  assert.equal(storageLabel({ path: "/scratch", pct: 45, quota: null }), "/scratch 45%");
+  assert.equal(storageLabel({ path: "/home/u", pct: 15, quota: { pct: 91 } }), "/home/u 91%");
+});
+
+test("pendingStart labels a known start, else null", () => {
+  const now = new Date(2026, 10, 17, 12, 0);
+  const cl = { pending: [{ id: "77", start: "2026-11-17T14:30:00" }, { id: "78", start: "2026-11-18T09:05:00" }] };
+  assert.equal(pendingStart(cl, "77", now), "starts ~14:30");
+  assert.equal(pendingStart(cl, 78, now), "starts ~Wed 09:05");
+  assert.equal(pendingStart(cl, "79", now), null);
+  assert.equal(pendingStart(null, "77", now), null);
+  assert.equal(pendingStart({ pending: [{ id: "77", start: "garbage" }] }, "77", now), null);
+});
+
+test("logTabs hides err when its tail is empty", () => {
+  assert.deepEqual(logTabs({ out_tail: ["a"], err_tail: [] }), ["out"]);
+  assert.deepEqual(logTabs({ out_tail: ["a"], err_tail: ["b"] }), ["out", "err"]);
+  assert.deepEqual(logTabs(null), ["out"]);
+});
+
+test("logLines keeps chronological order and at most 50 lines", () => {
+  const tail = Array.from({ length: 60 }, (_, i) => `l${i}`);
+  const lines = logLines({ out_tail: tail, err_tail: ["e"] }, "out");
+  assert.equal(lines.length, 50);
+  assert.equal(lines[0], "l10");
+  assert.equal(lines[49], "l59");
+  assert.deepEqual(logLines({ out_tail: ["a"], err_tail: ["e"] }, "err"), ["e"]);
+  assert.deepEqual(logLines({ out_tail: ["a"], err_tail: [] }, "err"), ["a"]);
+  assert.deepEqual(logLines(null, "out"), []);
+});
+
+test("agentPrompt holds the job facts, tails and the request", () => {
+  const out = Array.from({ length: 60 }, (_, i) => `out${i}`);
+  const p = agentPrompt({
+    machine: "Devana", ssh_target: "login.cluster-b.example", id: "123", state: "FAILED", name: "train",
+    stdout: "/home/u/slurm-123.out", stderr: "/home/u/slurm-123.err", out_tail: out, err_tail: ["boom"],
+  });
+  for (const s of ["Devana", "login.cluster-b.example", "123", "FAILED", "train", "/home/u/slurm-123.out", "/home/u/slurm-123.err", "out10", "out59", "boom"]) {
+    assert.ok(p.includes(s), s);
+  }
+  assert.ok(!p.includes("out9\n"));
+  assert.ok(p.includes("Diagnose why this Slurm job failed or is misbehaving. Use ssh login.cluster-b.example to read more of the logs."));
+});
+
+test("agentPrompt tolerates a job without detail", () => {
+  const p = agentPrompt({ machine: "Perun", ssh_target: "h", id: "9", state: "PENDING" });
+  assert.ok(p.includes("Use ssh h to read more of the logs."));
 });

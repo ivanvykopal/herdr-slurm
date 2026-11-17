@@ -1,12 +1,15 @@
 import { View, div } from "gpui-kit";
-import { v_flex, h_flex } from "gpui-base";
-import { exec, theme, props, shared, setShared, notify, playSound, checking } from "herdr";
-import { endedJobs, storageAlerts, shouldLead, mustAdopt, jobNotice, storageNotice, adoptState } from "./logic.js";
+import { v_flex, h_flex, ScrollHandle } from "gpui-base";
+import { exec, theme, props, shared, setShared, notify, playSound, checking, run, settings } from "herdr";
+import { endedJobs, storageAlerts, shouldLead, mustAdopt, jobNotice, storageNotice, adoptState, pendingStart, agentPrompt } from "./logic.js";
+import { detailBlock } from "./detail.js";
+import { clusterStrip } from "./strip.js";
 
 const TICK_MS = 5000;
 const SNAPSHOT_MS = 20000;
 const CLUSTER_MS = 120000;
 const FINAL_MAX_IDS = 50;
+const DETAIL_MS = 20000;
 const LEASE = "slurm.leader";
 const STATE = "slurm.state";
 const REFRESH = "slurm.refresh";
@@ -34,6 +37,10 @@ export default class Slurm extends View {
     this.copy = Math.random().toString(36).slice(2);
     this.width = 800;
     this.collapsed = {};
+    // Panel-copy state for expanded jobs, independent of the lease: one open job per machine.
+    this.open = {};
+    this.details = {};
+    this.logScroll = {};
     // Leader-only state; see tick().
     this.leading = false;
     this.polling = false;
@@ -49,6 +56,7 @@ export default class Slurm extends View {
     if (checking()) return;
     this.tick(cx);
     cx.timer.every(TICK_MS, (cx) => this.tick(cx));
+    if (!this.watch) cx.timer.every(TICK_MS, (cx) => this.detailTick(cx));
   }
 
   // Exactly one copy (the lease holder, watcher preferred) runs herdr-slurm and publishes
@@ -170,27 +178,156 @@ export default class Slurm extends View {
     }
   }
 
+  // Expanded job: `herdr-slurm job` on open and every DETAIL_MS while open; `gpu` adds --gpu.
+  toggleJob(m, j, cx) {
+    const id = String(j.id);
+    if (this.open[m.name] === id) {
+      delete this.open[m.name];
+      delete this.details[m.name];
+    } else {
+      this.open[m.name] = id;
+      this.details[m.name] = { id, job: j, data: null, error: null, at: 0, fetching: false, tab: "out",
+        confirm: null, busy: null, gpuBusy: false, gpu: null, logKey: null };
+      this.logScroll[m.name] ??= ScrollHandle.new();
+      this.fetchDetail(m.name, cx, false);
+    }
+    cx.notify();
+  }
+
+  // Blocks under a collapsed machine are not shown; they catch up within a tick of expanding.
+  detailTick(cx) {
+    const now = Date.now();
+    for (const [machine, det] of Object.entries(this.details)) {
+      if (!this.collapsed[machine] && !det.fetching && now - det.at >= DETAIL_MS) this.fetchDetail(machine, cx, false);
+    }
+  }
+
+  fetchDetail(machine, cx, gpu) {
+    const det = this.details[machine];
+    if (!det) return;
+    if (gpu) det.gpuBusy = true;
+    else { det.fetching = true; det.at = Date.now(); }
+    const args = ["job", machine, det.id, "--lines", "50", ...(gpu ? ["--gpu"] : [])];
+    cx.spawn(async (cx) => {
+      let d = null;
+      let error = null;
+      try {
+        d = JSON.parse((await exec(this.bin, args, { timeout: 60000 })).stdout);
+        if (d.error) { error = d.error; d = null; }
+      } catch (e) {
+        error = String(e?.message ?? e);
+      }
+      if (gpu) det.gpuBusy = false;
+      else det.fetching = false;
+      // Closed, or another job opened on this machine meanwhile.
+      if (this.details[machine] !== det) return;
+      // A job past MinJobAge errors; the last detail stays shown with the error.
+      det.error = error;
+      if (d) {
+        det.data = d;
+        if (gpu) det.gpu = { gpus: d.gpus ?? [], gpu_error: d.gpu_error ?? null };
+      }
+      cx.notify();
+    });
+  }
+
+  runAction(m, verb, cx) {
+    const det = this.details[m.name];
+    if (!det || det.busy) return;
+    det.busy = verb;
+    det.confirm = null;
+    cx.notify();
+    const id = det.id;
+    cx.spawn(async (cx) => {
+      let error = null;
+      try {
+        const r = JSON.parse((await exec(this.bin, ["action", m.name, id, verb], { timeout: 60000 })).stdout);
+        if (!r.ok || r.error) error = r.error || r.output || "failed";
+      } catch (e) {
+        error = String(e?.message ?? e);
+      }
+      det.busy = null;
+      if (error) {
+        notify({ title: `${m.name}: ${verb} ${id} failed`, body: error, level: "error" });
+      } else {
+        setShared(REFRESH, Date.now());
+        if (this.leading) this.tick(cx);
+        if (this.details[m.name] === det) this.fetchDetail(m.name, cx, false);
+      }
+      cx.notify();
+    });
+  }
+
+  detail(t, m, cx) {
+    const det = this.details[m.name];
+    const target = m.ssh_target || m.host;
+    return detailBlock(t, {
+      m, det,
+      font: settings().font_family ?? settings().font,
+      scroll: this.logScroll[m.name],
+      onVerb: (verb) => this.runAction(m, verb, cx),
+      onConfirm: (verb) => { det.confirm = verb; cx.notify(); },
+      onTab: (tab) => { det.tab = tab; cx.notify(); },
+      onGpu: () => { if (!det.gpuBusy) { this.fetchDetail(m.name, cx, true); cx.notify(); } },
+      onTerminal: () => run("tab.new", {
+        name: `${det.id}@${m.name}`,
+        argv: ["ssh", "-t", target, `srun --jobid=${det.id} --overlap --pty bash -l`],
+      }),
+      onAgent: () => {
+        const d = det.data ?? {};
+        run("tab.new", {
+          name: `log ${det.id}`,
+          argv: [props()?.agent ?? "claude"],
+          task: agentPrompt({ machine: m.name, ssh_target: target, id: det.id, state: d.state || det.job.state,
+            name: det.job.name, stdout: d.stdout, stderr: d.stderr, out_tail: d.out_tail, err_tail: d.err_tail }),
+        });
+      },
+    });
+  }
+
   note(t, text, color) {
     return div().px(12).py(6).text_size(12).text_color(color ?? t.muted).child(text);
   }
 
-  jobRow(t, j) {
+  jobRow(t, m, j, mc, cx) {
     const w = this.width;
+    const open = this.open[m.name] === String(j.id);
     const col = (text, width, color) =>
       div().w(width).flex_none().truncate().text_color(color ?? t.foreground).child(text || "-");
-    const row = h_flex().id(`job-${j.id}`).px(12).py(3).gap(10).text_size(12)
+    const reason = pendingStart(mc, j.id, new Date()) ?? (j.reason || j.where || "");
+    const row = h_flex().id(`job-${m.name}-${j.id}`).px(12).py(3).gap(10).text_size(12)
+      .when(open, (el) => el.bg(t.selected))
       .hover((s) => s.bg(t.hover))
+      .on_click(() => this.toggleJob(m, j, cx))
       .child(col(j.id, 84, t.muted))
       .child(col(j.state, 92, stateColor(j.state, t)));
     if (w >= 640) row.child(div().flex_1().truncate().child(j.name || "-")).child(col(j.account, 90, t.muted));
     else row.child(div().flex_1().truncate().child(j.name || "-"));
     row.child(col(j.elapsed, 72, t.muted));
-    if (w >= 640) row.child(col(j.nodes, 36, t.muted)).child(div().w(200).flex_none().truncate().text_color(t.dim).child(j.reason || j.where || ""));
-    else if (w >= 420) row.child(div().w(120).flex_none().truncate().text_color(t.dim).child(j.reason || j.where || ""));
+    if (w >= 640) row.child(col(j.nodes, 36, t.muted)).child(div().w(200).flex_none().truncate().text_color(t.dim).child(reason));
+    else if (w >= 420) row.child(div().w(120).flex_none().truncate().text_color(t.dim).child(reason));
     return row;
   }
 
-  machine(t, m, cx) {
+  // Job rows with the open job's block under its row. An open job that left the snapshot
+  // keeps its row and last detail at the end until closed.
+  jobRows(t, m, mc, cx) {
+    const det = this.details[m.name];
+    const out = [];
+    let found = false;
+    for (const j of m.error ? [] : m.jobs) {
+      out.push(this.jobRow(t, m, j, mc, cx));
+      if (det && det.id === String(j.id)) {
+        found = true;
+        det.job = j;
+        out.push(this.detail(t, m, cx));
+      }
+    }
+    if (det && !found) out.push(this.jobRow(t, m, det.job, mc, cx), this.detail(t, m, cx));
+    return out;
+  }
+
+  machine(t, m, mc, cx) {
     const open = !this.collapsed[m.name];
     const counts = {};
     for (const j of m.jobs) counts[j.state] = (counts[j.state] ?? 0) + 1;
@@ -203,9 +340,14 @@ export default class Slurm extends View {
       .child(div().text_size(11).text_color(t.dim).child(`${m.scheduler} · ${m.user}`))
       .child(div().flex_1())
       .child(div().text_size(11).text_color(m.error ? t.blocked : t.muted).child(summary));
-    const body = !open ? [] : m.error
-      ? [this.note(t, `✗ ${m.error}`, t.blocked)]
-      : m.jobs.length === 0 ? [this.note(t, "no jobs in queue")] : m.jobs.map((j) => this.jobRow(t, j));
+    const strip = open ? clusterStrip(t, mc) : null;
+    const rows = open ? this.jobRows(t, m, mc, cx) : [];
+    const body = !open ? [] : [
+      ...(strip ? [strip] : []),
+      ...(m.error ? [this.note(t, `✗ ${m.error}`, t.blocked)] : []),
+      ...(!m.error && rows.length === 0 ? [this.note(t, "no jobs in queue")] : []),
+      ...rows,
+    ];
     return v_flex().child(head).children(body);
   }
 
@@ -214,6 +356,7 @@ export default class Slurm extends View {
     const t = theme();
     const st = shared(STATE);
     const d = st?.snapshot ?? null;
+    const cl = st?.cluster ?? null;
     const failure = st?.failure ?? null;
     const stamp = d?.machines?.[0]?.fetched_at;
     const refreshing = (Number(shared(REFRESH)) || 0) > (st?.updated_at ?? 0);
@@ -238,7 +381,7 @@ export default class Slurm extends View {
       body = [
         ...(d.warnings ?? []).map((w) => this.note(t, w, t.done)),
         ...(failure ? [this.note(t, `refresh failed: ${failure}`, t.blocked)] : []),
-        ...d.machines.map((m) => this.machine(t, m, cx)),
+        ...d.machines.map((m) => this.machine(t, m, cl?.machines?.find((c) => c.name === m.name) ?? null, cx)),
       ];
     }
 
