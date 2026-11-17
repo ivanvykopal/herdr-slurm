@@ -129,12 +129,28 @@ export function mergedStorageLabel(path, merged) {
 
 // New `projects` output over the last good one: a top-level error keeps `prev` whole, and a
 // machine whose new entry has `error` keeps its previous entry, so a failed poll neither
-// drops quota % from the strip nor re-arms quota alerts.
+// drops quota % from the strip nor re-arms quota alerts. An unparsed myquota/perunfsusage
+// (or quotas gone empty) keeps the previous quotas, and the previous project storage for
+// accounts whose storage went null while perunfsusage did not parse.
 export function mergeProjects(prev, next) {
   if (!prev) return next ?? null;
   if (!next || next.error) return prev;
-  const machines = (next.machines || []).map((m) =>
-    (m.error && prev.machines?.find((p) => p.name === m.name && !p.error)) || m);
+  const machines = (next.machines || []).map((m) => {
+    const old = prev.machines?.find((p) => p.name === m.name && !p.error);
+    if (m.error) return old || m;
+    if (!old) return m;
+    const raw = m.raw || {};
+    const keepQuotas = raw.myquota || raw.perunfsusage || (!m.quotas?.length && old.quotas?.length);
+    let projects = m.projects;
+    if (raw.perunfsusage) {
+      projects = (m.projects || []).map((p) => {
+        if (p.storage?.pct != null) return p;
+        const o = old.projects?.find((x) => x.account === p.account);
+        return o?.storage ? { ...p, storage: o.storage } : p;
+      });
+    }
+    return { ...m, projects, quotas: keepQuotas ? old.quotas : m.quotas };
+  });
   return { ...next, machines };
 }
 
@@ -155,8 +171,8 @@ export function projectAlerts(prevArmed, projectsState) {
   for (const m of projectsState?.machines || []) {
     if (m.error) continue;
     for (const p of m.projects || []) {
-      for (const [kind, h] of [["CPU", p.cpu], ["GPU", p.gpu]]) {
-        const pct = hoursPct(h);
+      const kinds = [["CPU", hoursPct(p.cpu)], ["GPU", hoursPct(p.gpu)], ["storage", p.storage?.pct ?? null]];
+      for (const [kind, pct] of kinds) {
         if (pct == null) continue;
         const key = `${m.name}:${p.account}:${kind}`;
         const isArmed = armed[key] !== false;
@@ -175,6 +191,9 @@ export function projectAlerts(prevArmed, projectsState) {
 }
 
 export function projectNotice(alert) {
+  if (alert.kind === "storage") {
+    return { title: `${alert.machine}: ${alert.account} storage ${alert.pct}% of quota`, body: "Free space before jobs fail.", level: "warning" };
+  }
   return {
     title: `${alert.machine}: ${alert.account} ${alert.kind} hours ${alert.pct}% used`,
     body: "Ask the PI for more hours or slow down.",
