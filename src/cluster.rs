@@ -71,7 +71,7 @@ fn parse_gres(s: &str) -> Vec<(String, u64)> {
 }
 
 /// Lines `node|partition|gres|gres_used|state|` aggregated per partition and
-/// GPU type, in first-seen order. Unavailable nodes add to total only.
+/// GPU type, in first-seen order. Unavailable nodes add to total and used, never to free.
 fn aggregate_gpus(sinfo: &str) -> Vec<PartitionGpus> {
     let mut out: Vec<PartitionGpus> = Vec::new();
     for line in sinfo.lines() {

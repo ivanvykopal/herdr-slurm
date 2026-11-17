@@ -143,12 +143,12 @@ fn build_job_script(m: &Machine, id: &str, lines: u32, gpu: bool) -> String {
                 s.push_str(&format!(
                     "case \"$S\" in *' JobState=RUNNING '*)\n\
                      echo '@@herdr:gpu@@'\n\
-                     {{ g=$(timeout 25 {srun} --jobid={id} --overlap --ntasks-per-node=1 sh -c \
+                     {{ g=$(timeout 20 {srun} --jobid={id} --overlap --ntasks-per-node=1 sh -c \
                      'nvidia-smi --query-gpu=index,utilization.gpu,memory.used,memory.total \
                      --format=csv,noheader,nounits | sed \"s/^/$(hostname),/\"' 2>&1 1>&3 3>&-); r=$?; }} 3>&1\n\
                      echo '@@herdr:gpuerr@@'\n\
                      printf '%s\\n' \"$g\"\n\
-                     case $r in 0) ;; 124) echo 'timed out after 25 s' ;; *) echo \"exit $r\" ;; esac\n\
+                     case $r in 0) ;; 124) echo 'timed out after 20 s' ;; *) echo \"exit $r\" ;; esac\n\
                      ;; esac\n",
                     srun = tool(m, "srun"),
                 ));
@@ -229,7 +229,9 @@ fn job_json(
             let line = body.lines().find(|l| l.starts_with(marker)).unwrap_or("");
             let kv = parse_scontrol_kv(line);
             let get = |k: &str| kv.get(k).cloned();
-            let (cpus, mem, g) = parse_alloc_tres(kv.get("AllocTRES").map_or("", String::as_str));
+            // Older Slurm prints TRES= instead of AllocTRES=.
+            let tres = kv.get("AllocTRES").or_else(|| kv.get("TRES"));
+            let (cpus, mem, g) = parse_alloc_tres(tres.map_or("", String::as_str));
             state = get("JobState");
             node_list = get("NodeList");
             start_time = get("StartTime");
@@ -666,14 +668,24 @@ mod tests {
     }
 
     #[test]
+    fn alloc_falls_back_to_tres_on_older_slurm() {
+        let m = machine("slurm", "squeue");
+        let secs = crate::remote::sections(
+            "@@herdr:scontrol@@\nJobId=123 JobState=RUNNING NodeList=n1 TRES=cpu=8,mem=32G,node=1,gres/gpu=2\n",
+        );
+        let v = job_json(&m, "123", false, &secs, "");
+        assert_eq!(v["alloc"], serde_json::json!({ "cpus": 8, "mem": "32G", "gpus": 2 }));
+    }
+
+    #[test]
     fn gpu_failure_goes_to_gpu_error() {
         let m = machine("slurm", "squeue");
         let secs = crate::remote::sections(&format!(
-            "@@herdr:scontrol@@\n{SCONTROL}\n@@herdr:gpu@@\n@@herdr:gpuerr@@\nsrun: error: oops\ntimed out after 25 s\n"
+            "@@herdr:scontrol@@\n{SCONTROL}\n@@herdr:gpu@@\n@@herdr:gpuerr@@\nsrun: error: oops\ntimed out after 20 s\n"
         ));
         let v = job_json(&m, "123", true, &secs, "");
         assert_eq!(v["gpus"], serde_json::json!([]));
-        assert_eq!(v["gpu_error"], "srun: error: oops; timed out after 25 s");
+        assert_eq!(v["gpu_error"], "srun: error: oops; timed out after 20 s");
     }
 
     #[test]
@@ -705,7 +717,7 @@ mod tests {
         assert!(s.contains("/opt/slurm/bin/scontrol show job -o 123"), "{s}");
         assert!(s.contains("tail -n 50"));
         assert!(s.contains("/opt/slurm/bin/sstat -a -n -P -j 123 -o JobID,AveCPU,MaxRSS"));
-        assert!(s.contains("timeout 25 /opt/slurm/bin/srun --jobid=123 --overlap"));
+        assert!(s.contains("timeout 20 /opt/slurm/bin/srun --jobid=123 --overlap"));
         assert!(!build_job_script(&machine("slurm", "squeue"), "123", 50, false).contains("srun"));
         let p = build_job_script(&machine("pbs", "qstat"), "4021[].pbs01", 5, false);
         assert!(p.contains("qstat -f '4021[].pbs01'"), "{p}");
