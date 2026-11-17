@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   endedJobs, notifyLevel, gpuUnderuse, storageColorKey, storagePct,
-  storageAlerts, formatStart, shouldLead,
+  storageAlerts, formatStart, shouldLead, jobNotice, storageNotice, adoptState,
 } from "./logic.js";
 
 const job = (id, state, name = "j" + id) => ({ id, name, state });
@@ -120,4 +120,33 @@ test("stale lease is taken", () => {
   assert.equal(shouldLead({ copy: "x", at: 1000, watch: true }, "me", 61001, false), true);
   assert.equal(shouldLead(undefined, "me", 0, false), true);
   assert.equal(shouldLead({ copy: "me", at: 0, watch: false }, "me", 1, false), true);
+});
+
+test("jobNotice uses final state and exit code", () => {
+  const n = jobNotice({ machine: "devana", id: "7", name: "train" }, { id: "7", state: "FAILED", exit_code: 1 });
+  assert.deepEqual(n, { title: "devana: job 7 FAILED", body: "train · exit 1", level: "error" });
+});
+
+test("jobNotice without final is UNKNOWN warning", () => {
+  const n = jobNotice({ machine: "a", id: "3", name: "x" }, null);
+  assert.deepEqual(n, { title: "a: job 3 UNKNOWN", body: "x · exit ?", level: "warning" });
+});
+
+test("jobNotice keeps exit 0", () => {
+  const n = jobNotice({ machine: "a", id: "3", name: "x" }, { id: "3", state: "COMPLETED", exit_code: 0 });
+  assert.equal(n.body, "x · exit 0");
+  assert.equal(n.level, "success");
+});
+
+test("storageNotice text", () => {
+  assert.deepEqual(storageNotice({ machine: "a", path: "/scratch", pct: 93 }),
+    { title: "a: /scratch 93% full", body: "Free space before jobs fail.", level: "warning" });
+});
+
+test("adoptState takes fresh state only", () => {
+  const st = { updated_at: 1000, running: { "a/1": { machine: "a", id: "1", name: "n" } }, armed: { "a:/x": false } };
+  assert.deepEqual(adoptState(st, 1000 + 119999), { running: st.running, armed: st.armed });
+  assert.deepEqual(adoptState(st, 1000 + 120000), { running: null, armed: {} });
+  assert.deepEqual(adoptState(null, 5), { running: null, armed: {} });
+  assert.deepEqual(adoptState({ updated_at: 1000 }, 1001), { running: null, armed: {} });
 });

@@ -94,3 +94,28 @@ export function shouldLead(lease, me, now, isWatcher) {
   if (now - lease.at > 60000) return true;
   return Boolean(isWatcher && !lease.watch);
 }
+
+// `fin` is the job's entry from `herdr-slurm final`, or null when it could not be resolved.
+export function jobNotice(entry, fin) {
+  const state = fin?.state || "UNKNOWN";
+  return {
+    title: `${entry.machine}: job ${entry.id} ${state}`,
+    body: `${entry.name} · exit ${fin?.exit_code ?? "?"}`,
+    level: notifyLevel(state),
+  };
+}
+
+export function storageNotice(alert) {
+  return { title: `${alert.machine}: ${alert.path} ${alert.pct}% full`, body: "Free space before jobs fail.", level: "warning" };
+}
+
+const ADOPT_MS = 120000;
+
+// A new leader continues the previous leader's maps only when they are recent;
+// otherwise it reseeds (no notifications for jobs that ended while nobody watched).
+export function adoptState(state, now) {
+  if (state && typeof state.updated_at === "number" && now - state.updated_at < ADOPT_MS) {
+    return { running: state.running ?? null, armed: state.armed || {} };
+  }
+  return { running: null, armed: {} };
+}
