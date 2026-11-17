@@ -5,6 +5,7 @@ import {
   storageAlerts, formatStart, shouldLead, jobNotice, storageNotice, adoptState, mustAdopt,
   jobButtons, confirmText, factsLine, gpuChip, partitionLabel, partitionColorKey, storageLabel,
   pendingStart, logTabs, logLines, agentPrompt, endedSummary,
+  projectBars, mineLine, mergedStorageLabel, rawFallbacks,
 } from "./logic.js";
 
 const job = (id, state, name = "j" + id) => ({ id, name, state });
@@ -97,6 +98,38 @@ test("storage alert fires at 90 once and re-arms below 85", () => {
   assert.deepEqual(kept.armed, { "a:/s": false });
 });
 
+test("storage alert uses the quota % when projects are given", () => {
+  const cl = { error: null, machines: [{ name: "d", error: null, storage: [{ path: "/home/me", pct: 15, quota: null }] }] };
+  const pr = { machines: [{ name: "d", error: null, quotas: [{ path: "/home", pct: 92 }] }] };
+  assert.deepEqual(storageAlerts({}, cl, pr).alerts, [{ machine: "d", path: "/home/me", pct: 92 }]);
+  assert.deepEqual(storageAlerts({}, cl).alerts, []);
+  assert.deepEqual(storageAlerts({}, cl, { machines: [] }).alerts, []);
+});
+
+test("project row texts", () => {
+  const p = { cpu: { used: 8154, awarded: 88474, used_30d: 712, mine: 712 },
+    gpu: { used: 5253, awarded: 7964, used_30d: 446, mine: 446 } };
+  assert.deepEqual(projectBars(p), [
+    { kind: "CPU", label: "CPU 8154/88474 h", pct: 9, burn: "~3384 days left at the 30-day rate" },
+    { kind: "GPU", label: "GPU 5253/7964 h", pct: 66, burn: "~182 days left at the 30-day rate" },
+  ]);
+  assert.deepEqual(projectBars({ cpu: { used: 5, awarded: null }, gpu: { used: null, awarded: 10 } }), [
+    { kind: "CPU", label: "CPU 5 h", pct: null, burn: null },
+    { kind: "GPU", label: "GPU ?/10 h", pct: null, burn: null },
+  ]);
+  assert.deepEqual(projectBars({ cpu: null, gpu: { used: null, awarded: null } }), []);
+  assert.equal(mineLine(p), "you: 446 GPU h (30 d)");
+  assert.equal(mineLine({ gpu: { mine: null } }), null);
+  assert.equal(mergedStorageLabel("/home", { pct: 86, quota: true }), "/home 86% quota");
+  assert.equal(mergedStorageLabel("/scratch", { pct: 4, quota: false }), "/scratch 4%");
+});
+
+test("rawFallbacks lists unparsed tools with first 5 lines", () => {
+  const mp = { raw: { sprojects: "a\n\nb\nc\nd\ne\nf", myquota: null, perunfsusage: "" } };
+  assert.deepEqual(rawFallbacks(mp), [{ title: "could not read sprojects", lines: ["a", "b", "c", "d", "e"] }]);
+  assert.deepEqual(rawFallbacks(null), []);
+});
+
 test("formatStart today vs other day", () => {
   const now = new Date(2026, 10, 17, 9, 0); // Tue
   assert.equal(formatStart("2026-11-17T14:05:00", now), "14:05");
@@ -146,11 +179,12 @@ test("storageNotice text", () => {
 });
 
 test("adoptState takes fresh state only", () => {
-  const st = { updated_at: 1000, running: { "a/1": { machine: "a", id: "1", name: "n" } }, armed: { "a:/x": false } };
-  assert.deepEqual(adoptState(st, 1000 + 119999), { running: st.running, armed: st.armed });
-  assert.deepEqual(adoptState(st, 1000 + 120000), { running: null, armed: {} });
-  assert.deepEqual(adoptState(null, 5), { running: null, armed: {} });
-  assert.deepEqual(adoptState({ updated_at: 1000 }, 1001), { running: null, armed: {} });
+  const st = { updated_at: 1000, running: { "a/1": { machine: "a", id: "1", name: "n" } }, armed: { "a:/x": false },
+    projArmed: { "a:p1:GPU": false } };
+  assert.deepEqual(adoptState(st, 1000 + 119999), { running: st.running, armed: st.armed, projArmed: st.projArmed });
+  assert.deepEqual(adoptState(st, 1000 + 120000), { running: null, armed: {}, projArmed: {} });
+  assert.deepEqual(adoptState(null, 5), { running: null, armed: {}, projArmed: {} });
+  assert.deepEqual(adoptState({ updated_at: 1000 }, 1001), { running: null, armed: {}, projArmed: {} });
 });
 
 test("mustAdopt when not leading or lease held by another copy", () => {

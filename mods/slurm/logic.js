@@ -52,14 +52,16 @@ export function storageColorKey(pct) {
   return "ansi2";
 }
 
-export function storageAlerts(prevArmed, cluster) {
+// With `projectsState` (the `projects` output) a path under a user quota uses the quota %.
+export function storageAlerts(prevArmed, cluster, projectsState) {
   const armed = { ...(prevArmed || {}) };
   const alerts = [];
   for (const m of cluster?.machines || []) {
     if (m.error) continue;
+    const mp = projectsState?.machines?.find((x) => x.name === m.name) ?? null;
     for (const s of m.storage || []) {
       const key = `${m.name}:${s.path}`;
-      const pct = storagePct(s);
+      const pct = projectsState ? mergedStoragePct(s, mp).pct : storagePct(s);
       const isArmed = armed[key] !== false;
       if (isArmed && pct >= 90) {
         alerts.push({ machine: m.name, path: s.path, pct });
@@ -101,6 +103,39 @@ export function burnDays(h) {
 export function hoursPct(h) {
   if (!h || h.used == null || !h.awarded) return null;
   return Math.round((h.used / h.awarded) * 100);
+}
+
+// Bars of a project row: CPU then GPU, skipping a kind with neither used nor awarded.
+// `label` is `CPU 120/1000 h` (`CPU 120 h` without an award); `burn` the days-left line or null.
+export function projectBars(p) {
+  const out = [];
+  for (const [kind, h] of [["CPU", p.cpu], ["GPU", p.gpu]]) {
+    if (!h || (h.used == null && !h.awarded)) continue;
+    const label = h.awarded ? `${kind} ${h.used ?? "?"}/${h.awarded} h` : `${kind} ${h.used} h`;
+    const days = burnDays(h);
+    out.push({ kind, label, pct: hoursPct(h), burn: days == null ? null : `~${days} days left at the 30-day rate` });
+  }
+  return out;
+}
+
+export function mineLine(p) {
+  return p.gpu?.mine == null ? null : `you: ${p.gpu.mine} GPU h (30 d)`;
+}
+
+// Storage bar label with the merged %, ` quota` when a user quota decided it.
+export function mergedStorageLabel(path, merged) {
+  return `${path} ${merged.pct}%${merged.quota ? " quota" : ""}`;
+}
+
+// `raw` holds a tool's output only when it did not parse: a `could not read <tool>` entry
+// per such tool, with its first 5 non-empty lines.
+export function rawFallbacks(mp) {
+  const out = [];
+  for (const [tool, text] of Object.entries(mp?.raw ?? {})) {
+    if (typeof text !== "string" || !text.trim()) continue;
+    out.push({ title: `could not read ${tool}`, lines: text.split(/\r?\n/).filter((l) => l.trim()).slice(0, 5) });
+  }
+  return out;
 }
 
 export function projectAlerts(prevArmed, projectsState) {
@@ -205,9 +240,9 @@ const ADOPT_MS = 120000;
 // otherwise it reseeds (no notifications for jobs that ended while nobody watched).
 export function adoptState(state, now) {
   if (state && typeof state.updated_at === "number" && now - state.updated_at < ADOPT_MS) {
-    return { running: state.running ?? null, armed: state.armed || {} };
+    return { running: state.running ?? null, armed: state.armed || {}, projArmed: state.projArmed || {} };
   }
-  return { running: null, armed: {} };
+  return { running: null, armed: {}, projArmed: {} };
 }
 
 // Action bar of an expanded job, in display order.
