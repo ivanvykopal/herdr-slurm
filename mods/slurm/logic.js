@@ -74,6 +74,68 @@ export function storageAlerts(prevArmed, cluster) {
   return { armed, alerts };
 }
 
+export function quotaFor(machineProjects, path) {
+  let best = null;
+  let bestLen = -1;
+  for (const q of machineProjects?.quotas || []) {
+    if (typeof q.path !== "string" || q.pct == null) continue;
+    const p = q.path.replace(/\/+$/, "");
+    if ((path === p || path.startsWith(p + "/")) && p.length > bestLen) {
+      best = q;
+      bestLen = p.length;
+    }
+  }
+  return best ? { pct: best.pct, quota: true } : null;
+}
+
+export function mergedStoragePct(entry, machineProjects) {
+  return quotaFor(machineProjects, entry.path) || { pct: storagePct(entry), quota: false };
+}
+
+export function burnDays(h) {
+  if (!h || h.used == null || h.awarded == null || h.used_30d == null) return null;
+  if (!(h.awarded > h.used) || !(h.used_30d > 0)) return null;
+  return Math.floor((h.awarded - h.used) / (h.used_30d / 30));
+}
+
+export function hoursPct(h) {
+  if (!h || h.used == null || !h.awarded) return null;
+  return Math.round((h.used / h.awarded) * 100);
+}
+
+export function projectAlerts(prevArmed, projectsState) {
+  const armed = { ...(prevArmed || {}) };
+  const alerts = [];
+  for (const m of projectsState?.machines || []) {
+    if (m.error) continue;
+    for (const p of m.projects || []) {
+      for (const [kind, h] of [["CPU", p.cpu], ["GPU", p.gpu]]) {
+        const pct = hoursPct(h);
+        if (pct == null) continue;
+        const key = `${m.name}:${p.account}:${kind}`;
+        const isArmed = armed[key] !== false;
+        if (isArmed && pct >= 90) {
+          alerts.push({ machine: m.name, account: p.account, kind, pct });
+          armed[key] = false;
+        } else if (!isArmed && pct < 85) {
+          armed[key] = true;
+        } else {
+          armed[key] = isArmed;
+        }
+      }
+    }
+  }
+  return { armed, alerts };
+}
+
+export function projectNotice(alert) {
+  return {
+    title: `${alert.machine}: ${alert.account} ${alert.kind} hours ${alert.pct}% used`,
+    body: "Ask the PI for more hours or slow down.",
+    level: "warning",
+  };
+}
+
 const DAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 const pad2 = (n) => (n < 10 ? "0" : "") + n;
 
