@@ -873,4 +873,22 @@ mod tests {
         );
         assert_eq!(unsupported_json(&machine("P", "u", "")), None);
     }
+
+    #[test]
+    fn own_login_30d_hours_map_to_cpu_and_gpu_mine() {
+        let mut s = secs(PERUN);
+        s.insert(
+            "sreport30".into(),
+            "Cluster|Account|Login|Proper Name|TRES Name|Used\n\
+             slurm-perun2|perun2601397|||cpu|900\n\
+             slurm-perun2|perun2601397|||gres/gpu|500\n\
+             slurm-perun2|perun2601397|ivvyke441|Ivan|cpu|712\n\
+             slurm-perun2|perun2601397|ivvyke441|Ivan|gres/gpu|446"
+                .into(),
+        );
+        let v = machine_json(&machine("Perun", "ivvyke441", ""), &s);
+        let p = project(&v, "perun2601397");
+        assert_eq!(p["cpu"]["mine"], 712);
+        assert_eq!(p["gpu"]["mine"], 446);
+    }
 }

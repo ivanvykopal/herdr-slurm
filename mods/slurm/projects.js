@@ -18,7 +18,7 @@ const dimLine = (t, text) => div().text_size(11).text_color(t.dim).child(text);
 function projectRow(t, p) {
   const bars = projectBars(p);
   const mine = mineLine(p);
-  const storage = p.storage
+  const storage = p.storage?.pct != null
     ? bar(t, mergedStorageLabel(p.storage.path, { pct: p.storage.pct, quota: false }), p.storage.pct)
     : null;
   return v_flex().gap(2)
