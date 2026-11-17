@@ -5,7 +5,7 @@ import {
   storageAlerts, formatStart, shouldLead, jobNotice, storageNotice, adoptState, mustAdopt,
   jobButtons, confirmText, factsLine, gpuChip, partitionLabel, partitionColorKey, storageLabel,
   pendingStart, logTabs, logLines, agentPrompt, endedSummary,
-  projectBars, mineLine, mergedStorageLabel, rawFallbacks,
+  projectBars, mineLine, mergedStorageLabel, rawFallbacks, mergeProjects,
 } from "./logic.js";
 
 const job = (id, state, name = "j" + id) => ({ id, name, state });
@@ -122,6 +122,27 @@ test("project row texts", () => {
   assert.equal(mineLine({ gpu: { mine: null } }), null);
   assert.equal(mergedStorageLabel("/home", { pct: 86, quota: true }), "/home 86% quota");
   assert.equal(mergedStorageLabel("/scratch", { pct: 4, quota: false }), "/scratch 4%");
+});
+
+test("mergeProjects keeps last good data over errors", () => {
+  const good = { error: null, machines: [{ name: "d", error: null, quotas: [{ path: "/home", pct: 92 }] }] };
+  const bad = { error: null, machines: [{ name: "d", error: "timeout", quotas: [] }] };
+  const top = { error: "boom", machines: [] };
+  const cl = { error: null, machines: [{ name: "d", error: null, storage: [{ path: "/home/me", pct: 15, quota: null }] }] };
+  let st = mergeProjects(null, good);
+  let r = storageAlerts({}, cl, st);
+  assert.equal(r.alerts.length, 1);
+  st = mergeProjects(st, bad);
+  assert.deepEqual(st.machines[0], good.machines[0]);
+  r = storageAlerts(r.armed, cl, st);
+  assert.equal(r.alerts.length, 0);
+  st = mergeProjects(st, top);
+  assert.equal(st.error, null);
+  assert.deepEqual(st.machines[0], good.machines[0]);
+  r = storageAlerts(r.armed, cl, mergeProjects(st, good));
+  assert.equal(r.alerts.length, 0);
+  assert.deepEqual(mergeProjects(null, bad), bad);
+  assert.deepEqual(mergeProjects(null, top), top);
 });
 
 test("rawFallbacks lists unparsed tools with first 5 lines", () => {

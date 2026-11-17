@@ -127,6 +127,17 @@ export function mergedStorageLabel(path, merged) {
   return `${path} ${merged.pct}%${merged.quota ? " quota" : ""}`;
 }
 
+// New `projects` output over the last good one: a top-level error keeps `prev` whole, and a
+// machine whose new entry has `error` keeps its previous entry, so a failed poll neither
+// drops quota % from the strip nor re-arms quota alerts.
+export function mergeProjects(prev, next) {
+  if (!prev) return next ?? null;
+  if (!next || next.error) return prev;
+  const machines = (next.machines || []).map((m) =>
+    (m.error && prev.machines?.find((p) => p.name === m.name && !p.error)) || m);
+  return { ...next, machines };
+}
+
 // `raw` holds a tool's output only when it did not parse: a `could not read <tool>` entry
 // per such tool, with its first 5 non-empty lines.
 export function rawFallbacks(mp) {
