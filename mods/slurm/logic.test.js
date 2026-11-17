@@ -224,11 +224,19 @@ test("storageLabel uses the higher of filesystem and quota percent", () => {
 test("pendingStart labels a known start, else null", () => {
   const now = new Date(2026, 10, 17, 12, 0);
   const cl = { pending: [{ id: "77", start: "2026-11-17T14:30:00" }, { id: "78", start: "2026-11-18T09:05:00" }] };
-  assert.equal(pendingStart(cl, "77", now), "starts ~14:30");
-  assert.equal(pendingStart(cl, 78, now), "starts ~Wed 09:05");
-  assert.equal(pendingStart(cl, "79", now), null);
-  assert.equal(pendingStart(null, "77", now), null);
-  assert.equal(pendingStart({ pending: [{ id: "77", start: "garbage" }] }, "77", now), null);
+  assert.equal(pendingStart(cl, "77", "PENDING", now), "starts ~14:30");
+  assert.equal(pendingStart(cl, 78, "PENDING", now), "starts ~Wed 09:05");
+  assert.equal(pendingStart(cl, "79", "PENDING", now), null);
+  assert.equal(pendingStart(null, "77", "PENDING", now), null);
+  assert.equal(pendingStart({ pending: [{ id: "77", start: "garbage" }] }, "77", "PENDING", now), null);
+});
+
+test("pendingStart is null for a job that is no longer pending", () => {
+  const now = new Date(2026, 10, 17, 12, 0);
+  const cl = { pending: [{ id: "77", start: "2026-11-17T14:30:00" }] };
+  assert.equal(pendingStart(cl, "77", "RUNNING", now), null);
+  assert.equal(pendingStart(cl, "77", "COMPLETING", now), null);
+  assert.equal(pendingStart(cl, "77", undefined, now), null);
 });
 
 test("logTabs hides err when its tail is empty", () => {
