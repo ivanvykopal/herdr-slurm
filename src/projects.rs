@@ -561,8 +561,237 @@ pub fn cmd_projects() {
 mod tests {
     use super::*;
 
-    const CLUSTER_A: &str = include_str!("../tests/fixtures/cluster-a-projects.txt");
-    const CLUSTER_B: &str = include_str!("../tests/fixtures/cluster-b-projects.txt");
+    const CLUSTER_A: &str = "@@sshare
+acct0001|0|0.000000
+acct0002|0|0.000000
+acct0003|987654|1.000000
+acct0004|0|0.000000
+acct0005|0|0.000000
+acct0006|0|0.000000
+@@sreport
+--------------------------------------------------------------------------------
+Cluster/Account/User Utilization 2024-01-01T00:00:00 - 2026-03-02T09:59:59 (68377200 secs)
+Usage reported in TRES Hours
+--------------------------------------------------------------------------------
+Cluster|Account|Login|Proper Name|TRES Name|Used
+cluster-a|acct0001|||cpu|12000
+cluster-a|acct0001|||gres/gpu|3100
+cluster-a|acct0001|||billing|15100
+cluster-a|acct0001|alice|Alice Example|cpu|12000
+cluster-a|acct0001|alice|Alice Example|gres/gpu|3100
+cluster-a|acct0001|alice|Alice Example|billing|15100
+cluster-a|acct0002|||cpu|50000
+cluster-a|acct0002|||gres/gpu|7000
+cluster-a|acct0002|||billing|57000
+cluster-a|acct0002|user1|User One|cpu|21000
+cluster-a|acct0002|user1|User One|gres/gpu|1500
+cluster-a|acct0002|user1|User One|billing|22500
+cluster-a|acct0002|alice|Alice Example|cpu|2
+cluster-a|acct0002|alice|Alice Example|gres/gpu|0
+cluster-a|acct0002|alice|Alice Example|billing|2
+cluster-a|acct0002|user2|User Two|cpu|40
+cluster-a|acct0002|user2|User Two|gres/gpu|30
+cluster-a|acct0002|user2|User Two|billing|70
+cluster-a|acct0002|user3|User Three|cpu|25000
+cluster-a|acct0002|user3|User Three|gres/gpu|2400
+cluster-a|acct0002|user3|User Three|billing|27400
+cluster-a|acct0002|user4|User Four|cpu|3958
+cluster-a|acct0002|user4|User Four|gres/gpu|3070
+cluster-a|acct0002|user4|User Four|billing|7028
+cluster-a|acct0003|||cpu|7300
+cluster-a|acct0003|||gres/gpu|4800
+cluster-a|acct0003|||billing|12100
+cluster-a|acct0003|alice|Alice Example|cpu|7300
+cluster-a|acct0003|alice|Alice Example|gres/gpu|4800
+cluster-a|acct0003|alice|Alice Example|billing|12100
+cluster-a|acct0004|||cpu|3500
+cluster-a|acct0004|||gres/gpu|400
+cluster-a|acct0004|||billing|3900
+cluster-a|acct0004|user1|User One|cpu|1400
+cluster-a|acct0004|user1|User One|gres/gpu|290
+cluster-a|acct0004|user1|User One|billing|1690
+cluster-a|acct0004|alice|Alice Example|cpu|2070
+cluster-a|acct0004|alice|Alice Example|gres/gpu|100
+cluster-a|acct0004|alice|Alice Example|billing|2170
+cluster-a|acct0004|user5|User Five|cpu|5
+cluster-a|acct0004|user5|User Five|gres/gpu|1
+cluster-a|acct0004|user5|User Five|billing|6
+cluster-a|acct0004|user6|User Six|cpu|25
+cluster-a|acct0004|user6|User Six|gres/gpu|9
+cluster-a|acct0004|user6|User Six|billing|34
+cluster-a|acct0005|||cpu|18
+cluster-a|acct0005|||gres/gpu|3
+cluster-a|acct0005|||billing|21
+cluster-a|acct0005|user7|User Seven|cpu|18
+cluster-a|acct0005|user7|User Seven|gres/gpu|3
+cluster-a|acct0005|user7|User Seven|billing|21
+cluster-a|acct0006|||cpu|11000
+cluster-a|acct0006|||gres/gpu|2900
+cluster-a|acct0006|||billing|13900
+cluster-a|acct0006|alice|Alice Example|cpu|11000
+cluster-a|acct0006|alice|Alice Example|gres/gpu|2900
+cluster-a|acct0006|alice|Alice Example|billing|13900
+@@sreport30
+Invalid time specification (pos=1): -30days
+--------------------------------------------------------------------------------
+Cluster/Account/User Utilization 2026-03-01T00:00:00 - 2026-03-02T09:59:59 (122400 secs)
+Usage reported in TRES Hours
+--------------------------------------------------------------------------------
+Cluster|Account|Login|Proper Name|TRES Name|Used
+cluster-a|acct0004|||cpu|480
+cluster-a|acct0004|||gres/gpu|60
+cluster-a|acct0004|||billing|540
+cluster-a|acct0004|user1|User One|cpu|480
+cluster-a|acct0004|user1|User One|gres/gpu|60
+cluster-a|acct0004|user1|User One|billing|540
+@@qos
+acct0001|cpu=9000000,gres/gpu=300000
+acct0002|cpu=4800000,gres/gpu=660000
+acct0003|cpu=5400000,gres/gpu=480000
+acct0004|cpu=2400000,gres/gpu=300000
+acct0005|cpu=4500000,gres/gpu=360000
+acct0006|cpu=4500000,gres/gpu=360000
+@@assoc
+acct0001|node=0
+acct0002|node=0
+acct0003|cpu=512,gres/gpu=16
+acct0004|cpu=512,gres/gpu=16
+acct0005|cpu=512,gres/gpu=16
+acct0006|cpu=512,gres/gpu=16
+@@perunfsusage
+STORAGE USAGE FOR alice
+Generated: 2026-03-02 08:15:00
+
+Type      Name                 File system      Space used  Space limit     Used Status   
+----------------------------------------------------------------------------------------------------
+User      alice                /mnt/home            186 GB       442 GB    42.1%          [########............]
+User      alice                /mnt/scratch        4.00 KB          TBD        -          
+Project   acct0001             /mnt/project        4.00 KB          TBD        - inactive 
+Project   acct0002             /mnt/project        4.00 KB          TBD        - inactive 
+Project   acct0004             /mnt/project         640 GB      1000 GB    64.0% active   [#############.......]
+              Project Alpha
+Project   acct0006             /mnt/project        1.12 TB      5.00 TB    22.4% active   [####................]
+              Project Beta
+Project   acct0005             /mnt/project        22.0 TB      22.5 TB    97.8% active   [###################.]
+              Project Gamma: Example Workloads
+Project   acct0003             /mnt/project        5.41 TB      9.00 TB    60.1% active   [############........]
+              Project Delta
+
+Your data:     186 GB
+Project data:  29.2 TB
+
+NOTE: 2 of your projects are marked inactive (from a previous year).
+      Please archive or clean up data you no longer need.
+
+This file is regenerated automatically.
+
+SLURM LIMITS FOR alice
+-----------------------------------------------------------------------------------------------
+  Running jobs at once                 10
+  Jobs in queue (incl. running)        40
+  GPUs in use at once                  16
+  CPUs in use at once                  512
+  Nodes in use at once                 unlimited
+  GPUs in a single job                 16
+  CPUs in a single job                 512
+  Array jobs at once                   8
+  Running tasks of one array job       200
+  Choose nodes (--nodelist/--exclude)  no
+
+  Limits apply to you in each of your projects separately.
+  Limits updated: 2026-03-02 07:00
+";
+    const CLUSTER_B: &str = "@@sshare
+p0001-26-1|0|0.000000
+p0002-26-1|10480|0.000075
+p0003-26-1|0|0.000000
+p0004-25-1|0|0.000000
+p0005-25-1|0|0.000000
+@@sreport
+--------------------------------------------------------------------------------
+Cluster/Account/User Utilization 2024-01-01T00:00:00 - 2026-03-02T09:59:59 (68377200 secs)
+Usage reported in TRES Hours
+--------------------------------------------------------------------------------
+Cluster|Account|Login|Proper Name|TRES Name|Used
+cluster-b|p0002-26-1|bob|Bob Example|cpu|10230
+cluster-b|p0002-26-1|bob|Bob Example|gres/gpu|1388
+cluster-b|p0002-26-1|bob|Bob Example|billing|22000
+Invalid time specification (pos=1): -30days
+@@sreport30
+--------------------------------------------------------------------------------
+Cluster/Account/User Utilization 2026-03-01T00:00:00 - 2026-03-02T09:59:59 (122400 secs)
+Usage reported in TRES Hours
+--------------------------------------------------------------------------------
+Cluster|Account|Login|Proper Name|TRES Name|Used
+@@qos
+p0001-26-1|billing=2400000
+p0001-26-1_gpu|billing=5400000
+p0002-26-1|billing=360000
+p0002-26-1_gpu|billing=18000000
+p0003-26-1|billing=360000
+p0003-26-1_gpu|billing=12000000
+p0004-25-1|billing=2400000
+p0004-25-1_gpu|billing=36000000
+p0005-25-1|billing=360000
+p0005-25-1_gpu|billing=24000000
+@@assoc
+p0001-26-1|
+p0002-26-1|
+p0003-26-1|
+p0004-25-1|
+p0005-25-1|
+@@sprojects
++=========================================================================================+
+|                                     ACTIVE PROJECTS                                     |
++===============+=========================+=========================+=====================+
+|    Project    |       Allocations       |     Shared storages     |    Project users    |
++---------------+-------------------------+-------------------------+---------------------+
+| p0002-26-1    | CPU:      1820/6000     | /projects/p0002-26-1    | user1 (PI)          |
+|               | GPU:     6400/18000     | /scratch/p0002-26-1     | user2               |
+|               |                         |                         | user3               |
+|               |                         |                         | user4               |
+|               |                         |                         | user5               |
+|               |                         |                         | user6               |
+|               |                         |                         | bob                 |
+|               |                         |                         | user7               |
+|               |                         |                         | user8               |
++---------------+-------------------------+-------------------------+---------------------+
+| p0003-26-1    | CPU:       210/6000     | /projects/p0003-26-1    | user4 (PI)          |
+|               | GPU:     5900/12000     | /scratch/p0003-26-1     | user5               |
+|               |                         |                         | bob                 |
+|               |                         |                         | user9               |
+|               |                         |                         | user10              |
++===============+=========================+=========================+=====================+
++=========================================================================================+
+|                                    INACTIVE PROJECTS                                    |
++===============+=========================+=========================+=====================+
+|    Project    |       Allocations       |     Shared storages     |    Project users    |
++---------------+-------------------------+-------------------------+---------------------+
+| p0001-26-1    | CPU:      412/40000     | /projects/p0001-26-1    | user5 (PI)          |
+|               | GPU:      5000/5000     | /scratch/p0001-26-1     | user11              |
+|               |                         |                         | bob                 |
+|               |                         |                         | user12              |
++---------------+-------------------------+-------------------------+---------------------+
+| p0004-25-1    | CPU:        7/40000     | /projects/p0004-25-1    | user2 (PI)          |
+|               | GPU:    38000/38000     | /scratch/p0004-25-1     | user1               |
+|               |                         |                         | user3               |
+|               |                         |                         | bob                 |
+|               |                         |                         | user13              |
++---------------+-------------------------+-------------------------+---------------------+
+| p0005-25-1    | CPU:         0/6000     | /projects/p0005-25-1    | user1 (PI)          |
+|               | GPU:    15200/28000     | /scratch/p0005-25-1     | user2               |
+|               |                         |                         | user3               |
+|               |                         |                         | bob                 |
+|               |                         |                         | user14              |
++===============+=========================+=========================+=====================+
+@@myquota
+                               Example Workspaces Quota Report 
+============================================================================================
+  TYPE       NAME (       ID) WORKSPACE  :      USED DATA    QUOTA |     USED FILES    QUOTA
+............................................................................................
+  user        bob (100000042) /home      : \x1b[1;5;31m   820GB / 82%\x1b[21;25;0m   1000GB | \x1b[1;5;31m 1100000 / 54%\x1b[21;25;0m  2048000
+============================================================================================
+";
 
     /// Body of the `@@<name>` section of a fixture.
     fn section<'a>(text: &'a str, name: &str) -> &'a str {
