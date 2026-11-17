@@ -1,6 +1,6 @@
 import { div } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
-import { projectBars, mineLine, mergedStorageLabel, rawFallbacks, storageColorKey } from "./logic.js";
+import { projectBars, mineLine, mergedStorageLabel, rawFallbacks, storageColorKey, projectsSummary } from "./logic.js";
 
 const BAR_W = 48;
 
@@ -33,11 +33,20 @@ function projectRow(t, p) {
 
 // Active projects of one machine under its cluster strip; `machineProjects` is the machine's
 // entry from `herdr-slurm projects`. Null (no data yet, or a PBS machine) draws nothing.
-export function projectsBlock(t, machineProjects, _now) {
+// Collapsed by default: a clickable `▸ Projects  N active · K at ≥90%` header; `onToggle(cx)`
+// flips `open`. The summary turns `blocked` when anything is at or above 90 %.
+export function projectsBlock(t, machineProjects, id, open, onToggle) {
   const mp = machineProjects;
   if (!mp || mp.unsupported) return null;
-  const box = v_flex().px(12).py(4).gap(6).border_b(1).border_color(t.border)
-    .child(div().text_size(11).font_semibold().text_color(t.muted).child("Projects"));
+  const sum = projectsSummary(mp);
+  const head = h_flex().id(`projects-${id}`).gap(6).items_center().text_size(11)
+    .hover((s) => s.text_color(t.foreground))
+    .on_click((_e, cx) => onToggle(cx))
+    .child(div().text_color(t.muted).child(open ? "▾" : "▸"))
+    .child(div().font_semibold().text_color(t.muted).child("Projects"))
+    .child(div().text_color(sum.warn ? t.blocked : t.dim).child(sum.text));
+  const box = v_flex().px(12).py(4).gap(6).border_b(1).border_color(t.border).child(head);
+  if (!open) return box;
   if (mp.error) return box.child(dimLine(t, `projects: ${mp.error}`));
   const projects = mp.projects ?? [];
   return box

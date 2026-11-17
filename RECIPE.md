@@ -29,8 +29,13 @@ and projects at 90 % of their hours raise notifications.
   - A cluster query error shows `cluster: <message>` in dim text instead.
 - Projects block under the strip of an open Slurm machine (nothing on PBS
   machines, nothing before the first `projects` result):
-  - a `Projects` heading, then per active project the account and, dim and
-    truncated, its title when `perunfsusage` gives one;
+  - a `▸ Projects` header with a summary, `4 active · 1 at ≥90%` (`blocked`
+    when any project has CPU or GPU hours or storage at or above 90 %, else
+    dim; `none active`, `unavailable` on a projects error). The block is
+    collapsed by default; clicking the header opens or folds it, and the
+    choice is remembered per machine (mod `localStorage`, key `projectsOpen`);
+  - when open, per active project the account and, dim and truncated, its
+    title when `perunfsusage` gives one;
   - one bar per kind, `CPU 712/88474 h` and `GPU 3120/7964 h`, colored by %
     used like storage. Without an award the label is `CPU 712 h`; with an
     award but unknown use it is `CPU ?/5000 h`; both draw an empty `muted`

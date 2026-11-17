@@ -43,6 +43,8 @@ export default class Slurm extends View {
     this.copy = Math.random().toString(36).slice(2);
     this.width = 800;
     this.collapsed = {};
+    // Projects sections are collapsed until the person opens one; remembered per machine.
+    try { this.projectsOpen = JSON.parse(localStorage.getItem("projectsOpen") ?? "{}") || {}; } catch { this.projectsOpen = {}; }
     // Panel-copy state for expanded jobs, independent of the lease: one open job per machine.
     this.open = {};
     this.details = {};
@@ -412,7 +414,11 @@ export default class Slurm extends View {
       .child(div().flex_1())
       .child(div().text_size(11).text_color(m.error ? t.blocked : t.muted).child(summary));
     const strip = open ? clusterStrip(t, mc, mp) : null;
-    const projects = open ? projectsBlock(t, mp, Date.now()) : null;
+    const projects = open ? projectsBlock(t, mp, m.name, Boolean(this.projectsOpen[m.name]), (cx) => {
+      this.projectsOpen[m.name] = !this.projectsOpen[m.name];
+      localStorage.setItem("projectsOpen", JSON.stringify(this.projectsOpen));
+      cx.notify();
+    }) : null;
     const rows = open ? this.jobRows(t, m, mc) : [];
     const body = !open ? [] : [
       ...(strip ? [strip] : []),

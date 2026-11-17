@@ -122,6 +122,17 @@ export function mineLine(p) {
   return p.gpu?.mine == null ? null : `you: ${p.gpu.mine} GPU h (30 d)`;
 }
 
+// Header of the collapsed Projects section: how many are active and how many have CPU or GPU
+// hours or project storage at or above 90 %, so hiding the section never hides a warning.
+export function projectsSummary(mp) {
+  if (mp?.error) return { text: "unavailable", warn: true };
+  const projects = mp?.projects ?? [];
+  if (projects.length === 0) return { text: "none active", warn: false };
+  const hot = projects.filter((p) =>
+    [hoursPct(p.cpu), hoursPct(p.gpu), p.storage?.pct ?? null].some((v) => v != null && v >= 90)).length;
+  return { text: `${projects.length} active${hot ? ` · ${hot} at ≥90%` : ""}`, warn: hot > 0 };
+}
+
 // Storage bar label with the merged %, ` quota` when a user quota decided it.
 export function mergedStorageLabel(path, merged) {
   return `${path} ${merged.pct}%${merged.quota ? " quota" : ""}`;
