@@ -1347,6 +1347,8 @@ fn main() {
         Some("refresh") => cmd_refresh(),
         Some("snapshot") => cmd_snapshot(),
         Some("job") => jobcmd::cmd_job(),
+        Some("action") => jobcmd::cmd_action(),
+        Some("final") => jobcmd::cmd_final(),
         Some("start") => cmd_start(),
         Some("stop") => cmd_stop(),
         Some("daemon") => cmd_daemon(),

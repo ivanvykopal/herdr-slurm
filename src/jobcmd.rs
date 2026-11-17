@@ -358,6 +358,217 @@ pub fn cmd_job() {
     print_json(v);
 }
 
+/// Remote command for an `action` verb, or `None` for an unknown verb.
+/// `id` must already have passed `valid_job_id`.
+fn action_command(m: &Machine, id: &str, verb: &str) -> Option<String> {
+    let (name, sub) = match (&m.scheduler, verb) {
+        (Scheduler::Slurm, "cancel") => ("scancel", ""),
+        (Scheduler::Slurm, "requeue") => ("scontrol", " requeue"),
+        (Scheduler::Slurm, "hold") => ("scontrol", " hold"),
+        (Scheduler::Slurm, "release") => ("scontrol", " release"),
+        (Scheduler::Pbs, "cancel") => ("qdel", ""),
+        (Scheduler::Pbs, "requeue") => ("qrerun", ""),
+        (Scheduler::Pbs, "hold") => ("qhold", ""),
+        (Scheduler::Pbs, "release") => ("qrls", ""),
+        _ => return None,
+    };
+    Some(format!("{}{sub} {id}", tool(m, name)))
+}
+
+const ACTION_USAGE: &str = "usage: herdr-slurm action <machine> <id> <cancel|requeue|hold|release>";
+const FINAL_USAGE: &str = "usage: herdr-slurm final <machine> <id>... (at most 50 ids)";
+
+/// Print `error` and exit 2 (argument error).
+fn arg_error(error: &str) -> ! {
+    print_json(json!({ "error": error }));
+    std::process::exit(2);
+}
+
+/// Look up `name` in `machines.toml`; `Err` is the JSON error message.
+fn resolve_machine(name: &str) -> Result<Machine, String> {
+    let parsed = load_parsed()?;
+    find_machine(&parsed.machines, name)
+        .cloned()
+        .ok_or_else(|| format!("unknown machine '{name}'"))
+}
+
+pub fn cmd_action() {
+    let argv: Vec<String> = std::env::args().skip(2).collect();
+    let [machine, id, verb] = argv.as_slice() else {
+        arg_error(ACTION_USAGE);
+    };
+    let m = match resolve_machine(machine) {
+        Ok(m) => m,
+        Err(e) => return print_json(json!({ "error": e, "ok": false, "output": "" })),
+    };
+    if !valid_job_id(&m.scheduler, id) {
+        arg_error(&format!("invalid job id '{id}'"));
+    }
+    let Some(cmd) = action_command(&m, id, verb) else {
+        arg_error(&format!("invalid action '{verb}'"));
+    };
+    let v = match run_remote(&m, &cmd, Duration::from_secs(30)) {
+        Ok(out) if out.ok => json!({ "error": null, "ok": true, "output": out.stdout.trim() }),
+        Ok(out) => json!({
+            "error": last_line(&out.stderr).unwrap_or_else(|| "command failed".into()),
+            "ok": false,
+            "output": out.stdout.trim(),
+        }),
+        Err(e) => json!({ "error": e, "ok": false, "output": "" }),
+    };
+    print_json(v);
+}
+
+#[derive(Debug, PartialEq)]
+struct FinalJob {
+    id: String,
+    state: String,
+    exit_code: Option<String>,
+}
+
+/// First whitespace token, uppercased (`CANCELLED by 42` -> `CANCELLED`).
+fn normalize_final_state(s: &str) -> String {
+    s.split_whitespace()
+        .next()
+        .map_or_else(|| "UNKNOWN".into(), str::to_uppercase)
+}
+
+/// Slurm: `scontrol` maps id -> its `scontrol show job -o` line; `sacct` is
+/// `JobID|State|ExitCode` lines. scontrol wins, then sacct, else `UNKNOWN`.
+fn parse_final(scontrol: &HashMap<String, String>, sacct: &str, ids: &[String]) -> Vec<FinalJob> {
+    ids.iter()
+        .map(|id| {
+            let kv = scontrol.get(id).map(|l| parse_scontrol_kv(l));
+            if let Some(state) = kv.as_ref().and_then(|kv| kv.get("JobState")) {
+                return FinalJob {
+                    id: id.clone(),
+                    state: normalize_final_state(state),
+                    exit_code: kv.as_ref().and_then(|kv| kv.get("ExitCode")).cloned(),
+                };
+            }
+            sacct
+                .lines()
+                .map(|l| l.trim_end_matches('\r').split('|').collect::<Vec<_>>())
+                .find(|f| f.len() >= 3 && f[0] == id)
+                .map(|f| FinalJob {
+                    id: id.clone(),
+                    state: normalize_final_state(f[1]),
+                    exit_code: Some(f[2].to_string()).filter(|e| !e.is_empty()),
+                })
+                .unwrap_or_else(|| FinalJob {
+                    id: id.clone(),
+                    state: "UNKNOWN".into(),
+                    exit_code: None,
+                })
+        })
+        .collect()
+}
+
+/// PBS: `qstat -x -f` text (continuation lines already joined). `F` with
+/// `Exit_status` 0 is COMPLETED, other exit FAILED; an input id matches the
+/// block's `Job Id` exactly or without its `.server` suffix.
+fn parse_final_pbs(text: &str, ids: &[String]) -> Vec<FinalJob> {
+    let mut blocks: Vec<(String, HashMap<String, String>)> = Vec::new();
+    for line in text.lines().map(|l| l.trim_end_matches('\r')) {
+        if let Some(jid) = line.strip_prefix("Job Id:") {
+            blocks.push((jid.trim().to_string(), HashMap::new()));
+        } else if let (Some((_, kv)), Some((k, v))) = (blocks.last_mut(), line.split_once(" = ")) {
+            kv.insert(k.trim().to_string(), v.trim().to_string());
+        }
+    }
+    ids.iter()
+        .map(|id| {
+            let block = blocks.iter().find(|(jid, _)| {
+                jid == id || jid.strip_prefix(id.as_str()).is_some_and(|r| r.starts_with('.'))
+            });
+            let Some((_, kv)) = block else {
+                return FinalJob { id: id.clone(), state: "UNKNOWN".into(), exit_code: None };
+            };
+            let exit_code = kv.get("Exit_status").cloned();
+            let state = match (kv.get("job_state").map(String::as_str), exit_code.as_deref()) {
+                (Some("F"), Some(e)) if e != "0" => "FAILED".to_string(),
+                (Some(s), _) => normalize_pbs_state(s),
+                (None, _) => "UNKNOWN".to_string(),
+            };
+            FinalJob { id: id.clone(), state, exit_code }
+        })
+        .collect()
+}
+
+fn build_final_script(m: &Machine, ids: &[String]) -> String {
+    match m.scheduler {
+        Scheduler::Slurm => {
+            let scontrol = tool(m, "scontrol");
+            let mut s: String = ids
+                .iter()
+                .map(|id| format!("echo '@@herdr:sc:{id}@@'\n{scontrol} show job -o {id} 2>/dev/null\n"))
+                .collect();
+            s.push_str(&format!(
+                "echo '@@herdr:sacct@@'\n{} -n -X -P -j {} -o JobID,State,ExitCode 2>/dev/null\n",
+                tool(m, "sacct"),
+                ids.join(",")
+            ));
+            s
+        }
+        Scheduler::Pbs => format!(
+            "echo '@@herdr:qstat@@'\n\
+             {} -x -f {} 2>/dev/null | sed -e ':a' -e '$!N' -e 's/\\n\\t//' -e 'ta' -e 'P' -e 'D'\n\
+             echo '@@herdr:end@@'\n",
+            m.scheduler_command,
+            ids.join(" ")
+        ),
+    }
+}
+
+pub fn cmd_final() {
+    let ids: Vec<String> = std::env::args().skip(2).collect();
+    let Some((machine, ids)) = ids.split_first() else {
+        arg_error(FINAL_USAGE);
+    };
+    if ids.is_empty() || ids.len() > 50 {
+        arg_error(FINAL_USAGE);
+    }
+    let m = match resolve_machine(machine) {
+        Ok(m) => m,
+        Err(e) => return print_json(json!({ "error": e, "jobs": [] })),
+    };
+    if let Some(bad) = ids.iter().find(|id| !valid_job_id(&m.scheduler, id)) {
+        arg_error(&format!("invalid job id '{bad}'"));
+    }
+    let out = match run_remote(&m, &build_final_script(&m, ids), Duration::from_secs(30)) {
+        Ok(out) => out,
+        Err(e) => return print_json(json!({ "error": e, "jobs": [] })),
+    };
+    let secs = sections(&out.stdout);
+    let (complete, jobs) = match m.scheduler {
+        Scheduler::Slurm => {
+            let sc: HashMap<String, String> = ids
+                .iter()
+                .filter_map(|id| {
+                    let body = secs.get(&format!("sc:{id}"))?;
+                    let line = body.lines().find(|l| l.starts_with("JobId="))?;
+                    Some((id.clone(), line.to_string()))
+                })
+                .collect();
+            let sacct = secs.get("sacct");
+            (sacct.is_some(), parse_final(&sc, sacct.map_or("", String::as_str), ids))
+        }
+        Scheduler::Pbs => (
+            secs.contains_key("end"),
+            parse_final_pbs(secs.get("qstat").map_or("", String::as_str), ids),
+        ),
+    };
+    if !complete {
+        let e = last_line(&out.stderr).unwrap_or_else(|| "no output from cluster".into());
+        return print_json(json!({ "error": e, "jobs": [] }));
+    }
+    let jobs: Vec<Value> = jobs
+        .into_iter()
+        .map(|j| json!({ "id": j.id, "state": j.state, "exit_code": j.exit_code }))
+        .collect();
+    print_json(json!({ "error": null, "jobs": jobs }));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -515,5 +726,63 @@ mod tests {
         assert!(parse_args(&args(&["Devana", "1", "--lines"])).is_err());
         assert!(parse_args(&args(&["Devana", "1", "--bogus"])).is_err());
         assert!(parse_args(&args(&["Devana", "1", "2"])).is_err());
+    }
+
+    #[test]
+    fn action_maps_verbs_slurm() {
+        let m = machine("slurm", "squeue");
+        let a = |v: &str| action_command(&m, "123", v);
+        assert_eq!(a("cancel").as_deref(), Some("scancel 123"));
+        assert_eq!(a("requeue").as_deref(), Some("scontrol requeue 123"));
+        assert_eq!(a("hold").as_deref(), Some("scontrol hold 123"));
+        assert_eq!(a("release").as_deref(), Some("scontrol release 123"));
+        assert_eq!(a("rm"), None);
+    }
+
+    #[test]
+    fn action_maps_verbs_pbs() {
+        let m = machine("pbs", "qstat");
+        let a = |v: &str| action_command(&m, "123", v);
+        assert_eq!(a("cancel").as_deref(), Some("qdel 123"));
+        assert_eq!(a("requeue").as_deref(), Some("qrerun 123"));
+        assert_eq!(a("hold").as_deref(), Some("qhold 123"));
+        assert_eq!(a("release").as_deref(), Some("qrls 123"));
+        assert_eq!(a("rm"), None);
+    }
+
+    #[test]
+    fn final_prefers_scontrol_state() {
+        let sc = HashMap::from([(
+            "7".to_string(),
+            "JobId=7 JobState=OUT_OF_MEMORY ExitCode=0:125".to_string(),
+        )]);
+        let j = parse_final(&sc, "7|FAILED|1:0\n", &args(&["7"]));
+        assert_eq!(
+            j,
+            vec![FinalJob { id: "7".into(), state: "OUT_OF_MEMORY".into(), exit_code: Some("0:125".into()) }]
+        );
+    }
+
+    #[test]
+    fn final_falls_back_to_sacct_then_unknown() {
+        let j = parse_final(&HashMap::new(), "8|CANCELLED by 42|0:15\n", &args(&["8", "9"]));
+        assert_eq!(
+            j,
+            vec![
+                FinalJob { id: "8".into(), state: "CANCELLED".into(), exit_code: Some("0:15".into()) },
+                FinalJob { id: "9".into(), state: "UNKNOWN".into(), exit_code: None },
+            ]
+        );
+        assert_eq!(normalize_final_state("cancelled by 42"), "CANCELLED");
+    }
+
+    #[test]
+    fn final_pbs_exit_status() {
+        let text = "Job Id: 10.srv\n    job_state = F\n    Exit_status = 0\n\nJob Id: 11.srv\n    job_state = F\n    Exit_status = 271\n\nJob Id: 12.srv\n    job_state = R\n";
+        let j = parse_final_pbs(text, &args(&["10", "11.srv", "12", "13"]));
+        let st: Vec<_> = j.iter().map(|f| f.state.as_str()).collect();
+        assert_eq!(st, ["COMPLETED", "FAILED", "RUNNING", "UNKNOWN"]);
+        assert_eq!(j[1].exit_code.as_deref(), Some("271"));
+        assert_eq!(j[2].exit_code, None);
     }
 }

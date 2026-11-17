@@ -12,7 +12,6 @@ use crate::{
 pub struct RemoteOut {
     pub stdout: String,
     pub stderr: String,
-    #[allow(dead_code)] // read by the action subcommand (later task)
     pub ok: bool,
 }
 
