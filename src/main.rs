@@ -954,6 +954,67 @@ fn report_sidebar_token(machines: &[Machine], results: &HashMap<String, QueryRes
 
 // ------------------------------------------------------------------ actions --
 
+/// JSON document for one machine's query result (consumed by the herdr-app mod).
+fn machine_snapshot(m: &Machine, result: &QueryResult, fetched_at: i64) -> serde_json::Value {
+    let (error, jobs) = match result {
+        Ok(jobs) => (serde_json::Value::Null, jobs.as_slice()),
+        Err(e) => (serde_json::Value::String(e.clone()), &[][..]),
+    };
+    serde_json::json!({
+        "name": m.name,
+        "host": m.host,
+        "scheduler": match m.scheduler { Scheduler::Slurm => "slurm", Scheduler::Pbs => "pbs" },
+        "user": m.scheduler_user,
+        "error": error,
+        "fetched_at": fetched_at,
+        "jobs": jobs.iter().map(|j| serde_json::json!({
+            "id": j.id, "name": j.name, "state": j.state, "elapsed": j.elapsed,
+            "nodes": j.nodes, "account": j.account, "reason": j.reason, "where": j.where_,
+        })).collect::<Vec<_>>(),
+    })
+}
+
+/// `snapshot`: poll every machine once, in parallel, and print one JSON document.
+/// Config problems are reported as `{"error": ...}` so the mod can show them.
+fn cmd_snapshot() {
+    let path = config_dir().join("machines.toml");
+    if !path.exists() {
+        let _ = std::fs::create_dir_all(config_dir());
+        let _ = std::fs::write(&path, TEMPLATE);
+    }
+    let fail = |msg: String| println!("{}", serde_json::json!({ "error": msg, "machines": [] }));
+    let raw = match std::fs::read_to_string(&path) {
+        Ok(s) => s,
+        Err(e) => return fail(format!("cannot read {}: {e}", path.display())),
+    };
+    let parsed = match parse_machines(&raw) {
+        Ok(p) => p,
+        Err(e) => return fail(format!("invalid config in {}: {e}", path.display())),
+    };
+    let now = chrono::Utc::now().timestamp();
+    let results: Vec<QueryResult> = std::thread::scope(|s| {
+        let handles: Vec<_> = parsed
+            .machines
+            .iter()
+            .map(|m| s.spawn(move || query_machine(m)))
+            .collect();
+        handles
+            .into_iter()
+            .map(|h| h.join().unwrap_or_else(|_| Err("query panicked".into())))
+            .collect()
+    });
+    let machines: Vec<_> = parsed
+        .machines
+        .iter()
+        .zip(&results)
+        .map(|(m, r)| machine_snapshot(m, r, now))
+        .collect();
+    println!(
+        "{}",
+        serde_json::json!({ "error": null, "warnings": parsed.warnings, "machines": machines })
+    );
+}
+
 fn cmd_refresh() {
     let machines = match load_machines() {
         Some(m) => m,
@@ -1258,6 +1319,7 @@ fn main() {
     match std::env::args().nth(1).as_deref() {
         Some("open") => cmd_open(),
         Some("refresh") => cmd_refresh(),
+        Some("snapshot") => cmd_snapshot(),
         Some("start") => cmd_start(),
         Some("stop") => cmd_stop(),
         Some("daemon") => cmd_daemon(),
@@ -1835,5 +1897,19 @@ session = "{session}"
         assert_eq!(jobs.len(), 2);
         assert_eq!(jobs[0].id, "123");
         assert_eq!(jobs[1].reason, "Priority");
+    }
+
+    #[test]
+    fn snapshot_json_carries_jobs_and_errors() {
+        let entry: toml::Value = toml::from_str("name='C'\nhost='h'\nscheduler_user='u'").unwrap();
+        let m = parse_machine_entry(&entry).unwrap();
+        let ok: QueryResult = Ok(parse_slurm_jobs("1|a|RUNNING|0:01|1|acc||n1\n"));
+        let v = machine_snapshot(&m, &ok, 7);
+        assert_eq!(v["jobs"][0]["state"], "RUNNING");
+        assert_eq!(v["jobs"][0]["where"], "n1");
+        assert!(v["error"].is_null());
+        let bad = machine_snapshot(&m, &Err("down".into()), 7);
+        assert_eq!(bad["error"], "down");
+        assert_eq!(bad["jobs"].as_array().unwrap().len(), 0);
     }
 }
