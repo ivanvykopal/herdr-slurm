@@ -122,7 +122,9 @@ and projects at 90 % of their hours raise notifications.
   15 %. Project hours work the same way per account and kind: one `warning`
   `<machine>: <account> GPU hours 92% used` (body `Ask the PI for more hours
   or slow down.`) at 90 % of the award, again only after it has dropped below
-  85 %. A kind without an award or without known use never alerts. Neither
+  85 %. A kind without an award or without known use never alerts. Project
+  storage does the same at 90 % of its quota: `<machine>: <account> storage
+  98% of quota` (body `Free space before jobs fail.`). Neither
   alert plays a sound.
 - An unreachable cluster or scheduler error shows `✗ <message>` in red inside
   its section; other clusters keep working.

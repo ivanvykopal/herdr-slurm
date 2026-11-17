@@ -404,3 +404,51 @@ test("projectNotice text", () => {
     title: "a: acc GPU hours 92% used", body: "Ask the PI for more hours or slow down.", level: "warning",
   });
 });
+
+test("project storage alert fires once at 98 and re-arms below 85", () => {
+  const st = (pct) => ({ machines: [{ name: "a", error: null, projects: [
+    { account: "acc", cpu: null, gpu: null, storage: { path: "/p", pct } },
+  ] }] });
+  let r = projectAlerts(null, st(98));
+  assert.deepEqual(r.alerts, [{ machine: "a", account: "acc", kind: "storage", pct: 98 }]);
+  r = projectAlerts(r.armed, st(98));
+  assert.deepEqual(r.alerts, []);
+  r = projectAlerts(r.armed, st(84));
+  assert.equal(r.armed["a:acc:storage"], true);
+  r = projectAlerts(r.armed, st(null));
+  assert.equal(r.armed["a:acc:storage"], true);
+  r = projectAlerts(r.armed, st(91));
+  assert.equal(r.alerts.length, 1);
+  assert.deepEqual(projectNotice(r.alerts[0]), {
+    title: "a: acc storage 91% of quota", body: "Free space before jobs fail.", level: "warning",
+  });
+});
+
+test("project GPU alert fires and prevArmed is not mutated", () => {
+  const st = { machines: [{ name: "a", error: null, projects: [
+    { account: "acc", cpu: null, gpu: { used: 95, awarded: 100 } },
+  ] }] };
+  const prev = Object.freeze({ "a:acc:GPU": true });
+  const r = projectAlerts(prev, st);
+  assert.deepEqual(r.alerts, [{ machine: "a", account: "acc", kind: "GPU", pct: 95 }]);
+  assert.deepEqual(prev, { "a:acc:GPU": true });
+  assert.equal(r.armed["a:acc:GPU"], false);
+});
+
+test("mergeProjects carries quotas over an unparsed myquota poll", () => {
+  const cl = { machines: [{ name: "a", error: null, storage: [{ path: "/home/u", pct: 1, quota: null }] }] };
+  const pr = (quotas, raw = {}, spct = 50) => ({ machines: [{ name: "a", error: null, raw, quotas,
+    projects: [{ account: "acc", storage: { path: "/p", pct: spct } }] }] });
+  let p = mergeProjects(null, pr([{ path: "/home/u", pct: 92 }]));
+  let r = storageAlerts(null, cl, p);
+  assert.equal(r.alerts.length, 1);
+  p = mergeProjects(p, pr([], { myquota: "garbage" }, null));
+  assert.deepEqual(p.machines[0].quotas, [{ path: "/home/u", pct: 92 }]);
+  r = storageAlerts(r.armed, cl, p);
+  assert.equal(r.alerts.length, 0);
+  p = mergeProjects(p, pr([{ path: "/home/u", pct: 92 }]));
+  r = storageAlerts(r.armed, cl, p);
+  assert.equal(r.alerts.length, 0);
+  p = mergeProjects(p, pr([], { perunfsusage: "x" }, null));
+  assert.equal(p.machines[0].projects[0].storage.pct, 50);
+});
