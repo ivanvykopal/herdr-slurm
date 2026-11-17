@@ -561,8 +561,8 @@ pub fn cmd_projects() {
 mod tests {
     use super::*;
 
-    const PERUN: &str = include_str!("../tests/fixtures/perun-projects.txt");
-    const DEVANA: &str = include_str!("../tests/fixtures/devana-projects.txt");
+    const CLUSTER_A: &str = include_str!("../tests/fixtures/cluster-a-projects.txt");
+    const CLUSTER_B: &str = include_str!("../tests/fixtures/cluster-b-projects.txt");
 
     /// Body of the `@@<name>` section of a fixture.
     fn section<'a>(text: &'a str, name: &str) -> &'a str {
@@ -586,35 +586,35 @@ mod tests {
     #[test]
     fn accounts_from_sshare() {
         assert_eq!(
-            parse_accounts(section(PERUN, "sshare")),
-            vec!["acct0005", "acct0006", "acct0001", "acct0002", "acct0003", "acct0004"]
+            parse_accounts(section(CLUSTER_A, "sshare")),
+            vec!["acct0001", "acct0002", "acct0003", "acct0004", "acct0005", "acct0006"]
         );
         assert_eq!(
-            parse_accounts(section(DEVANA, "sshare")),
-            vec!["p0003-24-1", "p0001-26-1", "p0002-26-1", "p0004-24-1", "p0005-25-1"]
+            parse_accounts(section(CLUSTER_B, "sshare")),
+            vec!["p0001-26-1", "p0002-26-1", "p0003-26-1", "p0004-25-1", "p0005-25-1"]
         );
     }
 
     #[test]
     fn expired_accounts_from_assoc() {
-        let perun = parse_expired(section(PERUN, "assoc"));
-        assert_eq!(perun, HashSet::from(["acct0006".to_string(), "acct0005".to_string()]));
-        assert!(parse_expired(section(DEVANA, "assoc")).is_empty());
+        let a = parse_expired(section(CLUSTER_A, "assoc"));
+        assert_eq!(a, HashSet::from(["acct0002".to_string(), "acct0001".to_string()]));
+        assert!(parse_expired(section(CLUSTER_B, "assoc")).is_empty());
     }
 
     #[test]
-    fn awards_perun_from_qos() {
-        let a = parse_awards(section(PERUN, "qos"));
+    fn awards_cluster_a_from_qos() {
+        let a = parse_awards(section(CLUSTER_A, "qos"));
         assert_eq!(a.len(), 6);
-        assert_eq!(a["acct0001"], Award { cpu_h: Some(88474), gpu_h: Some(7964), billing_h: None });
+        assert_eq!(a["acct0003"], Award { cpu_h: Some(90000), gpu_h: Some(8000), billing_h: None });
     }
 
     #[test]
-    fn awards_devana_billing_split() {
-        let a = parse_awards(section(DEVANA, "qos"));
+    fn awards_cluster_b_billing_split() {
+        let a = parse_awards(section(CLUSTER_B, "qos"));
         assert_eq!(a.len(), 5);
-        assert!(!a.contains_key("p0001-26-1_gpu"));
-        assert_eq!(a["p0001-26-1"], Award { cpu_h: None, gpu_h: None, billing_h: Some(325000) });
+        assert!(!a.contains_key("p0002-26-1_gpu"));
+        assert_eq!(a["p0002-26-1"], Award { cpu_h: None, gpu_h: None, billing_h: Some(306000) });
     }
 
     #[test]
@@ -625,27 +625,27 @@ mod tests {
     }
 
     #[test]
-    fn sreport_totals_and_mine_perun() {
-        let u = parse_sreport(section(PERUN, "sreport"), "alice");
+    fn sreport_totals_and_mine_cluster_a() {
+        let u = parse_sreport(section(CLUSTER_A, "sreport"), "alice");
         assert_eq!(u.len(), 6);
-        let p = u["acct0001"];
+        let p = u["acct0003"];
         assert!(p.has_totals);
-        assert_eq!((p.cpu, p.gpu), (Some(8154), Some(5253)));
-        assert_eq!((p.mine_cpu, p.mine_gpu), (Some(8154), Some(5253)));
-        let shared = u["acct0006"];
-        assert_eq!((shared.cpu, shared.gpu, shared.mine_gpu), (Some(56588), Some(8247), Some(0)));
-        let other = u["acct0003"];
-        assert_eq!((other.cpu, other.mine_cpu), (Some(15), None));
+        assert_eq!((p.cpu, p.gpu), (Some(7300), Some(4800)));
+        assert_eq!((p.mine_cpu, p.mine_gpu), (Some(7300), Some(4800)));
+        let shared = u["acct0002"];
+        assert_eq!((shared.cpu, shared.gpu, shared.mine_gpu), (Some(50000), Some(7000), Some(0)));
+        let other = u["acct0005"];
+        assert_eq!((other.cpu, other.mine_cpu), (Some(18), None));
     }
 
     #[test]
     fn sreport30_ignores_error_line() {
-        let u = parse_sreport(section(PERUN, "sreport30"), "alice");
+        let u = parse_sreport(section(CLUSTER_A, "sreport30"), "alice");
         assert_eq!(u.len(), 1);
-        let p = u["acct0002"];
+        let p = u["acct0004"];
         assert!(p.has_totals);
-        assert_eq!((p.cpu, p.gpu, p.mine_cpu, p.mine_gpu), (Some(579), Some(72), None, None));
-        assert!(parse_sreport(section(DEVANA, "sreport30"), "bob").is_empty());
+        assert_eq!((p.cpu, p.gpu, p.mine_cpu, p.mine_gpu), (Some(480), Some(60), None, None));
+        assert!(parse_sreport(section(CLUSTER_B, "sreport30"), "bob").is_empty());
     }
 
     #[test]
@@ -656,32 +656,32 @@ mod tests {
 
     #[test]
     fn sreport_without_totals_gives_null_used() {
-        let u = parse_sreport(section(DEVANA, "sreport"), "bob");
-        let p = u["p0001-26-1"];
+        let u = parse_sreport(section(CLUSTER_B, "sreport"), "bob");
+        let p = u["p0002-26-1"];
         assert!(!p.has_totals);
         assert_eq!((p.cpu, p.gpu), (None, None));
-        assert_eq!((p.mine_cpu, p.mine_gpu), (Some(11745), Some(1454)));
+        assert_eq!((p.mine_cpu, p.mine_gpu), (Some(10230), Some(1388)));
     }
 
     #[test]
     fn sprojects_active_and_inactive() {
-        let p = parse_sprojects(section(DEVANA, "sprojects")).unwrap();
+        let p = parse_sprojects(section(CLUSTER_B, "sprojects")).unwrap();
         assert_eq!(p.len(), 5);
         assert_eq!(
             p[0],
             SProject {
-                account: "p0001-26-1".into(),
+                account: "p0002-26-1".into(),
                 active: true,
-                cpu_used: Some(1947),
-                cpu_awarded: Some(5000),
-                gpu_used: Some(7090),
-                gpu_awarded: Some(20000),
+                cpu_used: Some(1820),
+                cpu_awarded: Some(6000),
+                gpu_used: Some(6400),
+                gpu_awarded: Some(18000),
             }
         );
-        assert!(p[1].active && p[1].account == "p0002-26-1");
+        assert!(p[1].active && p[1].account == "p0003-26-1");
         let inactive = p.iter().find(|s| s.account == "p0005-25-1").unwrap();
         assert!(!inactive.active);
-        assert_eq!((inactive.gpu_used, inactive.gpu_awarded), (Some(17107), Some(30000)));
+        assert_eq!((inactive.gpu_used, inactive.gpu_awarded), (Some(15200), Some(28000)));
     }
 
     #[test]
@@ -692,16 +692,16 @@ mod tests {
 
     #[test]
     fn myquota_user_home() {
-        let q = parse_myquota(section(DEVANA, "myquota")).unwrap();
+        let q = parse_myquota(section(CLUSTER_B, "myquota")).unwrap();
         assert_eq!(
             q,
             vec![Quota {
                 kind: "user",
                 name: "bob".into(),
                 path: "/home".into(),
-                used_kb: 863 * GIB,
+                used_kb: 820 * GIB,
                 limit_kb: 1000 * GIB,
-                pct: Some(86),
+                pct: Some(82),
             }]
         );
         assert_eq!(parse_myquota("garbage"), None);
@@ -710,29 +710,29 @@ mod tests {
 
     #[test]
     fn perunfsusage_rows() {
-        let (users, projects) = parse_perunfsusage(section(PERUN, "perunfsusage")).unwrap();
+        let (users, projects) = parse_perunfsusage(section(CLUSTER_A, "perunfsusage")).unwrap();
         assert_eq!(
             users,
             vec![Quota {
                 kind: "user",
                 name: "alice".into(),
                 path: "/mnt/home".into(),
-                used_kb: 211 * GIB,
-                limit_kb: 500 * GIB,
+                used_kb: 186 * GIB,
+                limit_kb: 442 * GIB,
                 pct: Some(42),
             }]
         );
         assert_eq!(projects.len(), 6);
-        let p = projects.iter().find(|p| p.account == "acct0003").unwrap();
+        let p = projects.iter().find(|p| p.account == "acct0005").unwrap();
         assert_eq!(p.pct, Some(98));
         assert!(p.active);
         assert_eq!(p.path, "/mnt/project");
-        assert_eq!(p.title.as_deref(), Some("Project Gamma"));
-        let gone = projects.iter().find(|p| p.account == "acct0005").unwrap();
+        assert_eq!(p.title.as_deref(), Some("Project Gamma: Example Workloads"));
+        let gone = projects.iter().find(|p| p.account == "acct0001").unwrap();
         assert!(!gone.active);
         assert_eq!((gone.limit_kb, gone.pct, gone.title.as_deref()), (None, None, None));
-        let last = projects.iter().find(|p| p.account == "acct0001").unwrap();
-        assert_eq!(last.title.as_deref(), Some("Project Alpha"));
+        let last = projects.iter().find(|p| p.account == "acct0003").unwrap();
+        assert_eq!(last.title.as_deref(), Some("Project Delta"));
         assert_eq!(parse_perunfsusage("garbage"), None);
         assert_eq!(parse_perunfsusage(""), Some((vec![], vec![])));
     }
@@ -740,9 +740,9 @@ mod tests {
     #[test]
     fn size_units() {
         assert_eq!(parse_size_kib("4.00 KB"), Some(4));
-        assert_eq!(parse_size_kib("211 GB"), Some(211 * GIB));
-        assert_eq!(parse_size_kib("1.01 TB"), Some((1.01f64 * 1024f64.powi(3)).round() as u64));
-        assert_eq!(parse_size_kib("863GB"), Some(863 * GIB));
+        assert_eq!(parse_size_kib("186 GB"), Some(186 * GIB));
+        assert_eq!(parse_size_kib("1.12 TB"), Some((1.12f64 * 1024f64.powi(3)).round() as u64));
+        assert_eq!(parse_size_kib("820GB"), Some(820 * GIB));
         assert_eq!(parse_size_kib("2 MB"), Some(2048));
         assert_eq!(parse_size_kib("TBD"), None);
         assert_eq!(parse_size_kib("12 XB"), None);
@@ -766,12 +766,12 @@ mod tests {
         out
     }
 
-    fn perun() -> Value {
-        machine_json(&machine("Perun", "alice", ""), &secs(PERUN))
+    fn cluster_a() -> Value {
+        machine_json(&machine("ClusterA", "alice", ""), &secs(CLUSTER_A))
     }
 
-    fn devana() -> Value {
-        machine_json(&machine("Devana", "bob", ""), &secs(DEVANA))
+    fn cluster_b() -> Value {
+        machine_json(&machine("ClusterB", "bob", ""), &secs(CLUSTER_B))
     }
 
     fn accounts(v: &Value) -> Vec<&str> {
@@ -803,64 +803,64 @@ mod tests {
 
     #[test]
     fn expired_accounts_are_omitted() {
-        assert_eq!(accounts(&perun()), vec!["acct0001", "acct0002", "acct0003", "acct0004"]);
+        assert_eq!(accounts(&cluster_a()), vec!["acct0003", "acct0004", "acct0005", "acct0006"]);
     }
 
     #[test]
-    fn perun_project_json() {
-        let v = perun();
+    fn cluster_a_project_json() {
+        let v = cluster_a();
         assert_eq!(v["error"], Value::Null);
         assert_eq!(v["source"], "sreport");
-        let p = project(&v, "acct0001");
-        assert_eq!(p["title"], "Project Alpha");
+        let p = project(&v, "acct0003");
+        assert_eq!(p["title"], "Project Delta");
         assert_eq!(p["active"], true);
-        assert_eq!(p["gpu"], json!({ "used": 5253, "awarded": 7964, "used_30d": 0, "mine": null }));
-        assert_eq!(p["cpu"]["awarded"], 88474);
-        assert_eq!(p["storage"]["pct"], 64);
+        assert_eq!(p["gpu"], json!({ "used": 4800, "awarded": 8000, "used_30d": 0, "mine": null }));
+        assert_eq!(p["cpu"]["awarded"], 90000);
+        assert_eq!(p["storage"]["pct"], 60);
         assert_eq!(p["storage"]["path"], "/mnt/project");
-        let busy = project(&v, "acct0002");
-        assert_eq!((busy["gpu"]["used_30d"].as_u64(), busy["cpu"]["used_30d"].as_u64()), (Some(72), Some(579)));
+        let busy = project(&v, "acct0004");
+        assert_eq!((busy["gpu"]["used_30d"].as_u64(), busy["cpu"]["used_30d"].as_u64()), (Some(60), Some(480)));
         assert_eq!(v["raw"], json!({ "sprojects": null, "myquota": null, "perunfsusage": null }));
     }
 
     #[test]
-    fn devana_project_json() {
-        let v = devana();
+    fn cluster_b_project_json() {
+        let v = cluster_b();
         assert_eq!(v["source"], "sprojects");
-        assert_eq!(accounts(&v), vec!["p0001-26-1", "p0002-26-1"]);
-        let p = project(&v, "p0001-26-1");
-        assert_eq!(p["gpu"], json!({ "used": 7090, "awarded": 20000, "used_30d": null, "mine": null }));
-        assert_eq!(p["cpu"]["used"], 1947);
+        assert_eq!(accounts(&v), vec!["p0002-26-1", "p0003-26-1"]);
+        let p = project(&v, "p0002-26-1");
+        assert_eq!(p["gpu"], json!({ "used": 6400, "awarded": 18000, "used_30d": null, "mine": null }));
+        assert_eq!(p["cpu"]["used"], 1820);
         assert_eq!((p["title"].clone(), p["storage"].clone()), (Value::Null, Value::Null));
     }
 
     #[test]
     fn unparseable_sprojects_goes_to_raw() {
-        let mut s = secs(DEVANA);
+        let mut s = secs(CLUSTER_B);
         s.insert("sprojects".into(), "garbage\nlines".into());
-        let v = machine_json(&machine("Devana", "bob", ""), &s);
+        let v = machine_json(&machine("ClusterB", "bob", ""), &s);
         assert_eq!(v["source"], "sreport");
         assert_eq!(v["raw"]["sprojects"], "garbage\nlines");
-        assert_eq!(accounts(&v), vec!["p0003-24-1", "p0001-26-1", "p0002-26-1", "p0004-24-1", "p0005-25-1"]);
-        let p = project(&v, "p0001-26-1");
+        assert_eq!(accounts(&v), vec!["p0001-26-1", "p0002-26-1", "p0003-26-1", "p0004-25-1", "p0005-25-1"]);
+        let p = project(&v, "p0002-26-1");
         assert_eq!(p["gpu"], json!({ "used": null, "awarded": null, "used_30d": null, "mine": null }));
     }
 
     #[test]
     fn quotas_listed() {
-        let d = devana();
-        assert_eq!(d["quotas"].as_array().unwrap().len(), 1);
-        assert_eq!((d["quotas"][0]["path"].clone(), d["quotas"][0]["pct"].clone()), (json!("/home"), json!(86)));
-        let p = perun();
-        assert_eq!(p["quotas"].as_array().unwrap().len(), 1);
-        assert_eq!((p["quotas"][0]["path"].clone(), p["quotas"][0]["pct"].clone()), (json!("/mnt/home"), json!(42)));
+        let b = cluster_b();
+        assert_eq!(b["quotas"].as_array().unwrap().len(), 1);
+        assert_eq!((b["quotas"][0]["path"].clone(), b["quotas"][0]["pct"].clone()), (json!("/home"), json!(82)));
+        let a = cluster_a();
+        assert_eq!(a["quotas"].as_array().unwrap().len(), 1);
+        assert_eq!((a["quotas"][0]["path"].clone(), a["quotas"][0]["pct"].clone()), (json!("/mnt/home"), json!(42)));
     }
 
     #[test]
     fn quota_pct_computed_when_missing() {
-        let mut s = secs(DEVANA);
+        let mut s = secs(CLUSTER_B);
         s.insert("myquota".into(), "user me (1) /home : 50GB / 200GB".into());
-        let v = machine_json(&machine("Devana", "me", ""), &s);
+        let v = machine_json(&machine("ClusterB", "me", ""), &s);
         assert_eq!(v["quotas"][0]["pct"], 25);
     }
 
@@ -876,18 +876,18 @@ mod tests {
 
     #[test]
     fn own_login_30d_hours_map_to_cpu_and_gpu_mine() {
-        let mut s = secs(PERUN);
+        let mut s = secs(CLUSTER_A);
         s.insert(
             "sreport30".into(),
             "Cluster|Account|Login|Proper Name|TRES Name|Used\n\
-             slurm-perun2|acct0001|||cpu|900\n\
-             slurm-perun2|acct0001|||gres/gpu|500\n\
-             slurm-perun2|acct0001|alice|Ivan|cpu|712\n\
-             slurm-perun2|acct0001|alice|Ivan|gres/gpu|446"
+             cluster-a|acct0003|||cpu|900\n\
+             cluster-a|acct0003|||gres/gpu|500\n\
+             cluster-a|acct0003|alice|Alice|cpu|712\n\
+             cluster-a|acct0003|alice|Alice|gres/gpu|446"
                 .into(),
         );
-        let v = machine_json(&machine("Perun", "alice", ""), &s);
-        let p = project(&v, "acct0001");
+        let v = machine_json(&machine("ClusterA", "alice", ""), &s);
+        let p = project(&v, "acct0003");
         assert_eq!(p["cpu"]["mine"], 712);
         assert_eq!(p["gpu"]["mine"], 446);
     }
