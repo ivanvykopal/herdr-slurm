@@ -173,8 +173,10 @@ export function storageLabel(s) {
   return `${s.path} ${storagePct(s)}%`;
 }
 
-// Expected start of a pending job from `cluster.pending`, or null when unknown.
-export function pendingStart(clusterMachine, id, now) {
+// Expected start of a pending job from `cluster.pending`, or null when unknown. Only for
+// PENDING jobs: a job that just started keeps its stale pending entry until the next cluster poll.
+export function pendingStart(clusterMachine, id, state, now) {
+  if (!/^PEND/i.test(state || "")) return null;
   const p = (clusterMachine?.pending ?? []).find((e) => String(e.id) === String(id));
   const when = p ? formatStart(p.start, now) : "";
   return when ? `starts ~${when}` : null;

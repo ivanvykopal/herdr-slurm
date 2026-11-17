@@ -11,12 +11,13 @@ const LOG_MAX_H = 220;
 function button(t, id, label, onClick, disabled) {
   const b = div().id(id).px(8).py(2).rounded(4).border(1).border_color(t.border).text_size(11);
   if (disabled) return b.text_color(t.dim).child(label);
-  return b.text_color(t.foreground).hover((s) => s.bg(t.hover)).on_click(onClick).child(label);
+  return b.text_color(t.foreground).hover((s) => s.bg(t.hover)).on_click((_e, cx) => onClick(cx)).child(label);
 }
 
 // Expanded block under an open job row.
 // ctx: { m (snapshot machine), det (detail state from main.js), font, scroll (ScrollHandle),
-//        onVerb(verb), onConfirm(verb|null), onTerminal(), onAgent(), onGpu(), onTab(tab) }
+//        onVerb(verb, cx), onConfirm(verb|null, cx), onTerminal(), onAgent(), onGpu(cx), onTab(tab, cx) }
+// Every cx here is the click handler's own; a render cx is only valid during that render.
 export function detailBlock(t, ctx) {
   const { m, det } = ctx;
   const d = det.data;
@@ -27,9 +28,9 @@ export function detailBlock(t, ctx) {
   const bar = h_flex().flex_wrap().gap(6).children(keys.map((k) => {
     if (k === "terminal") return button(t, `t-${key}`, LABELS[k], () => ctx.onTerminal(), false);
     if (k === "agent") return button(t, `a-${key}`, LABELS[k], () => ctx.onAgent(), false);
-    if (k === "gpu") return button(t, `g-${key}`, det.gpuBusy ? "GPU usage…" : LABELS[k], () => ctx.onGpu(), det.gpuBusy);
+    if (k === "gpu") return button(t, `g-${key}`, det.gpuBusy ? "GPU usage…" : LABELS[k], (cx) => ctx.onGpu(cx), det.gpuBusy);
     const label = det.busy === k ? `${LABELS[k]}…` : LABELS[k];
-    const click = () => (confirmText(k, det.id) ? ctx.onConfirm(k) : ctx.onVerb(k));
+    const click = (cx) => (confirmText(k, det.id) ? ctx.onConfirm(k, cx) : ctx.onVerb(k, cx));
     return button(t, `v-${k}-${key}`, label, click, busy);
   }));
 
@@ -40,8 +41,8 @@ export function detailBlock(t, ctx) {
   if (ask) {
     block.child(h_flex().flex_wrap().gap(6).items_center()
       .child(div().text_color(t.foreground).child(ask))
-      .child(button(t, `y-${key}`, "Yes", () => ctx.onVerb(det.confirm), busy))
-      .child(button(t, `n-${key}`, "No", () => ctx.onConfirm(null), busy)));
+      .child(button(t, `y-${key}`, "Yes", (cx) => ctx.onVerb(det.confirm, cx), busy))
+      .child(button(t, `n-${key}`, "No", (cx) => ctx.onConfirm(null, cx), busy)));
   }
   if (det.error) block.child(div().text_size(11).text_color(t.blocked).child(det.error));
   if (!d) {
@@ -69,7 +70,7 @@ export function detailBlock(t, ctx) {
       .bg(name === tab ? t.selected : t.raised)
       .text_color(name === tab ? t.foreground : t.muted)
       .hover((s) => s.bg(t.hover))
-      .on_click(() => ctx.onTab(name))
+      .on_click((_e, cx) => ctx.onTab(name, cx))
       .child(name))));
   block.child(v_flex().id(`log-${key}`).max_h(LOG_MAX_H).overflow_y_scrollbar().track_scroll(ctx.scroll)
     .p(4).rounded(4).bg(t.background).font_family(ctx.font).text_size(11).text_color(t.foreground)

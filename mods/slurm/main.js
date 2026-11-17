@@ -205,30 +205,38 @@ export default class Slurm extends View {
   fetchDetail(machine, cx, gpu) {
     const det = this.details[machine];
     if (!det) return;
+    const done = () => { if (gpu) det.gpuBusy = false; else det.fetching = false; };
     if (gpu) det.gpuBusy = true;
     else { det.fetching = true; det.at = Date.now(); }
     const args = ["job", machine, det.id, "--lines", "50", ...(gpu ? ["--gpu"] : [])];
-    cx.spawn(async (cx) => {
-      let d = null;
-      let error = null;
-      try {
-        d = JSON.parse((await exec(this.bin, args, { timeout: 60000 })).stdout);
-        if (d.error) { error = d.error; d = null; }
-      } catch (e) {
-        error = String(e?.message ?? e);
-      }
-      if (gpu) det.gpuBusy = false;
-      else det.fetching = false;
-      // Closed, or another job opened on this machine meanwhile.
-      if (this.details[machine] !== det) return;
-      // A job past MinJobAge errors; the last detail stays shown with the error.
-      det.error = error;
-      if (d) {
-        det.data = d;
-        if (gpu) det.gpu = { gpus: d.gpus ?? [], gpu_error: d.gpu_error ?? null };
-      }
-      cx.notify();
-    });
+    // The busy flag is cleared on every path, so detailTick and the GPU button can retry.
+    let spawned = false;
+    try {
+      cx.spawn(async (cx) => {
+        let d = null;
+        let error = null;
+        try {
+          d = JSON.parse((await exec(this.bin, args, { timeout: 60000 })).stdout);
+          if (d.error) { error = d.error; d = null; }
+        } catch (e) {
+          error = String(e?.message ?? e);
+        } finally {
+          done();
+        }
+        // Closed, or another job opened on this machine meanwhile.
+        if (this.details[machine] !== det) return;
+        // A job past MinJobAge errors; the last detail stays shown with the error.
+        det.error = error;
+        if (d) {
+          det.data = d;
+          if (gpu) det.gpu = { gpus: d.gpus ?? [], gpu_error: d.gpu_error ?? null };
+        }
+        cx.notify();
+      });
+      spawned = true;
+    } finally {
+      if (!spawned) done();
+    }
   }
 
   runAction(m, verb, cx) {
@@ -238,37 +246,45 @@ export default class Slurm extends View {
     det.confirm = null;
     cx.notify();
     const id = det.id;
-    cx.spawn(async (cx) => {
-      let error = null;
-      try {
-        const r = JSON.parse((await exec(this.bin, ["action", m.name, id, verb], { timeout: 60000 })).stdout);
-        if (!r.ok || r.error) error = r.error || r.output || "failed";
-      } catch (e) {
-        error = String(e?.message ?? e);
-      }
-      det.busy = null;
-      if (error) {
-        notify({ title: `${m.name}: ${verb} ${id} failed`, body: error, level: "error" });
-      } else {
-        setShared(REFRESH, Date.now());
-        if (this.leading) this.tick(cx);
-        if (this.details[m.name] === det) this.fetchDetail(m.name, cx, false);
-      }
-      cx.notify();
-    });
+    let spawned = false;
+    try {
+      cx.spawn(async (cx) => {
+        let error = null;
+        try {
+          const r = JSON.parse((await exec(this.bin, ["action", m.name, id, verb], { timeout: 60000 })).stdout);
+          if (!r.ok || r.error) error = r.error || r.output || "failed";
+        } catch (e) {
+          error = String(e?.message ?? e);
+        } finally {
+          det.busy = null;
+        }
+        if (error) {
+          notify({ title: `${m.name}: ${verb} ${id} failed`, body: error, level: "error" });
+        } else {
+          setShared(REFRESH, Date.now());
+          if (this.leading) this.tick(cx);
+          if (this.details[m.name] === det) this.fetchDetail(m.name, cx, false);
+        }
+        cx.notify();
+      });
+      spawned = true;
+    } finally {
+      if (!spawned) det.busy = null;
+    }
   }
 
-  detail(t, m, cx) {
+  // Handlers receive their own cx: a render cx is only valid during that render.
+  detail(t, m) {
     const det = this.details[m.name];
     const target = m.ssh_target || m.host;
     return detailBlock(t, {
       m, det,
       font: settings().font_family ?? settings().font,
       scroll: this.logScroll[m.name],
-      onVerb: (verb) => this.runAction(m, verb, cx),
-      onConfirm: (verb) => { det.confirm = verb; cx.notify(); },
-      onTab: (tab) => { det.tab = tab; cx.notify(); },
-      onGpu: () => { if (!det.gpuBusy) { this.fetchDetail(m.name, cx, true); cx.notify(); } },
+      onVerb: (verb, cx) => this.runAction(m, verb, cx),
+      onConfirm: (verb, cx) => { det.confirm = verb; cx.notify(); },
+      onTab: (tab, cx) => { det.tab = tab; cx.notify(); },
+      onGpu: (cx) => { if (!det.gpuBusy) { this.fetchDetail(m.name, cx, true); cx.notify(); } },
       onTerminal: () => run("tab.new", {
         name: `${det.id}@${m.name}`,
         argv: ["ssh", "-t", target, `srun --jobid=${det.id} --overlap --pty bash -l`],
@@ -289,16 +305,16 @@ export default class Slurm extends View {
     return div().px(12).py(6).text_size(12).text_color(color ?? t.muted).child(text);
   }
 
-  jobRow(t, m, j, mc, cx) {
+  jobRow(t, m, j, mc) {
     const w = this.width;
     const open = this.open[m.name] === String(j.id);
     const col = (text, width, color) =>
       div().w(width).flex_none().truncate().text_color(color ?? t.foreground).child(text || "-");
-    const reason = pendingStart(mc, j.id, new Date()) ?? (j.reason || j.where || "");
+    const reason = pendingStart(mc, j.id, j.state, new Date()) ?? (j.reason || j.where || "");
     const row = h_flex().id(`job-${m.name}-${j.id}`).px(12).py(3).gap(10).text_size(12)
       .when(open, (el) => el.bg(t.selected))
       .hover((s) => s.bg(t.hover))
-      .on_click(() => this.toggleJob(m, j, cx))
+      .on_click((_e, cx) => this.toggleJob(m, j, cx))
       .child(col(j.id, 84, t.muted))
       .child(col(j.state, 92, stateColor(j.state, t)));
     if (w >= 640) row.child(div().flex_1().truncate().child(j.name || "-")).child(col(j.account, 90, t.muted));
@@ -311,37 +327,37 @@ export default class Slurm extends View {
 
   // Job rows with the open job's block under its row. An open job that left the snapshot
   // keeps its row and last detail at the end until closed.
-  jobRows(t, m, mc, cx) {
+  jobRows(t, m, mc) {
     const det = this.details[m.name];
     const out = [];
     let found = false;
     for (const j of m.error ? [] : m.jobs) {
-      out.push(this.jobRow(t, m, j, mc, cx));
+      out.push(this.jobRow(t, m, j, mc));
       if (det && det.id === String(j.id)) {
         found = true;
         det.job = j;
-        out.push(this.detail(t, m, cx));
+        out.push(this.detail(t, m));
       }
     }
-    if (det && !found) out.push(this.jobRow(t, m, det.job, mc, cx), this.detail(t, m, cx));
+    if (det && !found) out.push(this.jobRow(t, m, det.job, mc), this.detail(t, m));
     return out;
   }
 
-  machine(t, m, mc, cx) {
+  machine(t, m, mc) {
     const open = !this.collapsed[m.name];
     const counts = {};
     for (const j of m.jobs) counts[j.state] = (counts[j.state] ?? 0) + 1;
     const summary = m.error ? "unreachable" : Object.entries(counts).map(([k, v]) => `${v} ${k.toLowerCase()}`).join(", ") || "no jobs";
     const head = h_flex().id(`m-${m.name}`).px(12).py(6).gap(8).items_center().bg(t.raised)
       .hover((s) => s.bg(t.hover))
-      .on_click(() => { this.collapsed[m.name] = open; cx.notify(); })
+      .on_click((_e, cx) => { this.collapsed[m.name] = open; cx.notify(); })
       .child(div().text_color(t.muted).text_size(12).child(open ? "▾" : "▸"))
       .child(div().font_semibold().text_size(13).text_color(t.foreground).child(m.name))
       .child(div().text_size(11).text_color(t.dim).child(`${m.scheduler} · ${m.user}`))
       .child(div().flex_1())
       .child(div().text_size(11).text_color(m.error ? t.blocked : t.muted).child(summary));
     const strip = open ? clusterStrip(t, mc) : null;
-    const rows = open ? this.jobRows(t, m, mc, cx) : [];
+    const rows = open ? this.jobRows(t, m, mc) : [];
     const body = !open ? [] : [
       ...(strip ? [strip] : []),
       ...(m.error ? [this.note(t, `✗ ${m.error}`, t.blocked)] : []),
@@ -381,7 +397,7 @@ export default class Slurm extends View {
       body = [
         ...(d.warnings ?? []).map((w) => this.note(t, w, t.done)),
         ...(failure ? [this.note(t, `refresh failed: ${failure}`, t.blocked)] : []),
-        ...d.machines.map((m) => this.machine(t, m, cl?.machines?.find((c) => c.name === m.name) ?? null, cx)),
+        ...d.machines.map((m) => this.machine(t, m, cl?.machines?.find((c) => c.name === m.name) ?? null)),
       ];
     }
 
