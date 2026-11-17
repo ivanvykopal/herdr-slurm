@@ -137,3 +137,32 @@ description = "Scheduler jobs sidebar"
   are not shown.
 - Requirements: Rust toolchain (to build), OpenSSH client on PATH, and either
   `squeue` or JSON-capable `qstat` on each remote cluster.
+
+## herdr desktop app mod
+
+`mods/slurm/` is a side-panel mod for the [herdr desktop app](https://herdr.dev/app/docs/):
+the same per-cluster job table, beside Files, Git and Skills. It reuses your
+`machines.toml` through `herdr-slurm snapshot`, which polls every machine once
+in parallel and prints one JSON document. See [RECIPE.md](RECIPE.md).
+
+![Slurm Jobs](preview.png)
+
+Install:
+
+```sh
+cargo install --path .                      # puts herdr-slurm on PATH
+cp -R mods/slurm ~/.config/herdr-app/mods/
+herdr-app check ~/.config/herdr-app/mods/slurm
+```
+
+Or ask your herdr agent: *"add the mod at github.com/ivanvykopal/herdr-slurm"*.
+
+Show it as a panel: add `{ "id": "slurm", "type": "block", "content": { "mod": "slurm" } }`
+to your layout's `panel-body` stack and a top-bar button that runs
+`layout.select {stack:"panel-body", child:"slurm"}` and `layout.show {id:"panel"}`
+(RECIPE.md has the details). Without a layout edit, open it as a tab instead:
+`herdr-app do tab.new --name Slurm --mod slurm`. Binary not on PATH:
+`--props '{"bin":"C:\\path\\herdr-slurm.exe"}'`.
+
+It polls every 20 s, has a Refresh button, folds per machine, and drops columns
+below 640/420 px. Unreachable clusters and config errors show inline.
