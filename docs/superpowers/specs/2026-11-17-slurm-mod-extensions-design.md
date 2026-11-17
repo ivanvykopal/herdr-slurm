@@ -95,9 +95,10 @@ bare names on the remote PATH.
 ```
 
 Slurm: `scancel`, `scontrol requeue`, `scontrol hold`, `scontrol release`.
-PBS: `qdel`, `qrerun`, `qhold`, `qrls`. Non-zero remote exit gives
-`ok: false` and `error` = last stderr line. Any other verb is an argument
-error.
+PBS: `qdel`, `qrerun`, `qhold`, `qrls`; PBS ids are single-quoted in the
+remote command (array ids like `4021[7]` are glob patterns). Non-zero remote
+exit gives `ok: false` and `error` = last stderr line. Any other verb is an
+argument error.
 
 ### `herdr-slurm final <machine> <id>...`
 
@@ -108,8 +109,9 @@ error.
 Slurm: `scontrol show job -o <id>` per id (`JobState`, `ExitCode`); ids it
 no longer knows go to one `sacct -n -X -P -j a,b -o JobID,State,ExitCode`;
 ids neither knows get state `UNKNOWN`. `CANCELLED by 42` normalises to
-`CANCELLED`. PBS: `qstat -x -f -F json <ids>`, `job_state` F with
-`Exit_status` 0 maps to `COMPLETED`, other exit to `FAILED`.
+`CANCELLED`. PBS: `qstat -x -f <ids>` text form (not `-F json`), `job_state`
+F with `Exit_status` 0 maps to `COMPLETED`, other exit to `FAILED`, F
+without `Exit_status` to `UNKNOWN`.
 
 ### `herdr-slurm cluster`
 
@@ -126,8 +128,9 @@ All machines in parallel:
 - Partitions: from the `sinfo` line above, one row per (node, partition).
   Per partition, per GPU type (untyped `gpu:8` gives type `""`): total =
   sum of Gres counts, used = sum of GresUsed counts. Nodes whose state
-  contains `down`, `drain`, `fail`, `maint` or `resv` count to total and to
-  neither used nor free. `gpus_free = total - used - unavailable`.
+  contains `down`, `drain`, `drng`, `fail`, `maint` or `resv` count to total;
+  GPUs in use on them still count to `gpus_used`, only their free GPUs are
+  withheld. `gpus_free = total - used - unavailable free`.
   Partitions with no GPUs are omitted. PBS machines: `partitions: []`.
 - Pending: `squeue -u <user> -t PD --start -h -o "%i|%S"`; `N/A` gives
   `start: null`. PBS: `[]`.
@@ -162,11 +165,14 @@ flowchart LR
 
 - Exactly one copy polls: the leader. A copy becomes leader when
   `shared("slurm.leader")` is missing or its `at` is older than 60 s; the
-  leader refreshes `{copy, at}` every poll. Watcher copies (`props.watch`)
-  take the lease first; a panel copy polls only when no lease is fresh, so
-  the panel still works in layouts without a watcher.
-- The leader publishes `shared("slurm.state") = {snapshot, cluster,
-  updated_at}`. Every copy renders from it. `↻ Refresh` asks the leader via
+  leader refreshes `{copy, at, watch}` every tick. Watcher copies
+  (`props.watch`) are preferred: a watcher may take a fresh lease from a
+  panel copy; a panel copy polls only when no lease is fresh, so the panel
+  still works in layouts without a watcher.
+- The leader publishes `shared("slurm.state") = {snapshot, cluster, failure,
+  updated_at, running, armed}`. Every copy renders from it. A new leader
+  adopts `running`/`armed` only when `updated_at` is < 120 s old, otherwise
+  it reseeds. `↻ Refresh` asks the leader via
   `shared("slurm.refresh") = <timestamp>`.
 - The watcher copy renders nothing (`div()`), in a zero-height block
   `{ "id": "slurm-bg", "type": "block", "size": {"px": 0}, "content": {"mod": "slurm", "props": {"watch": true}} }`
@@ -241,7 +247,8 @@ quota), again only after it has dropped below 85 %.
   aggregation from the two probed line formats incl. drained nodes; `lfs
   quota -q` parsing incl. limit 0 and `*` suffix; `df -Pk` parsing;
   `final` state normalisation; section splitting; `storage` validation.
-- Pure JS in `mods/slurm/logic.js`, tested with `node --test`: ended-job
+- Pure JS in `mods/slurm/logic.js`, tested with
+  `node --test mods/slurm/logic.test.js`: ended-job
   detection incl. unreachable machine and first-snapshot seeding; GPU
   under-use flag; storage threshold hysteresis; start-time formatting;
   lease decision.

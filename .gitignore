@@ -1,2 +1,4 @@
 /target
 machines.toml
+mods/slurm/gpui-kit.d.ts
+mods/slurm/jsconfig.json

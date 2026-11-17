@@ -5,6 +5,10 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant, SystemTime};
 
+mod cluster;
+mod jobcmd;
+mod remote;
+
 const REFRESH_SECS: u64 = 20;
 const TARGET_COLS: usize = 50; // sidebar width used by the `open` subcommand
 const SQUEUE_FMT: &str = "%.18i|%j|%T|%M|%D|%a|%R|%N";
@@ -27,6 +31,7 @@ struct Machine {
     scheduler_command: String,
     ssh_user: Option<String>,
     session: String, // herdr session on the cluster to report to; "" = default
+    storage: Vec<String>, // remote paths for disk-usage bars; [] = defaults
 }
 
 impl Machine {
@@ -102,6 +107,8 @@ const TEMPLATE: &str = r#"# herdr scheduler machines. One [[machine]] block per 
 # (over ssh to `host`), so no herdr machine label has to match.
 # `session` (optional) is the herdr session on the cluster whose workspaces
 # get the sidebar token; omit it for the default session.
+# `storage` (optional) lists remote paths whose disk usage is shown, e.g.
+# storage = ["$HOME", "/mnt/scratch"]; `$HOME`/`$USER` expand on the cluster.
 
 [[machine]]
 name = "MyCluster"
@@ -276,6 +283,10 @@ fn parse_machine_entry(entry: &toml::Value) -> Result<Machine, String> {
     {
         return Err(format!("invalid session '{session}'"));
     }
+    let storage = match entry.get("storage") {
+        None => Vec::new(),
+        Some(value) => parse_storage(value)?,
+    };
     Ok(Machine {
         name: g("name"),
         host,
@@ -284,7 +295,29 @@ fn parse_machine_entry(entry: &toml::Value) -> Result<Machine, String> {
         scheduler_command,
         ssh_user,
         session,
+        storage,
     })
+}
+
+/// `storage` paths land in a remote shell command: non-empty, only
+/// `[A-Za-z0-9_./~$-]`, without `..` components (`$HOME`/`$USER` expand remotely).
+fn parse_storage(value: &toml::Value) -> Result<Vec<String>, String> {
+    let invalid = |p: &str| format!("invalid storage path '{p}'");
+    let list = value.as_array().ok_or_else(|| invalid(&value.to_string()))?;
+    let mut out = Vec::with_capacity(list.len());
+    for item in list {
+        let p = item.as_str().ok_or_else(|| invalid(&item.to_string()))?;
+        if p.is_empty()
+            || !p.chars().all(|c| {
+                c.is_ascii_alphanumeric() || matches!(c, '/' | '_' | '-' | '.' | '~' | '$')
+            })
+            || p.split('/').any(|seg| seg == "..")
+        {
+            return Err(invalid(p));
+        }
+        out.push(p.to_string());
+    }
+    Ok(out)
 }
 
 // -------------------------------------------------------------------- data --
@@ -963,6 +996,7 @@ fn machine_snapshot(m: &Machine, result: &QueryResult, fetched_at: i64) -> serde
     serde_json::json!({
         "name": m.name,
         "host": m.host,
+        "ssh_target": m.ssh_target(),
         "scheduler": match m.scheduler { Scheduler::Slurm => "slurm", Scheduler::Pbs => "pbs" },
         "user": m.scheduler_user,
         "error": error,
@@ -977,19 +1011,11 @@ fn machine_snapshot(m: &Machine, result: &QueryResult, fetched_at: i64) -> serde
 /// `snapshot`: poll every machine once, in parallel, and print one JSON document.
 /// Config problems are reported as `{"error": ...}` so the mod can show them.
 fn cmd_snapshot() {
-    let path = config_dir().join("machines.toml");
-    if !path.exists() {
-        let _ = std::fs::create_dir_all(config_dir());
-        let _ = std::fs::write(&path, TEMPLATE);
-    }
-    let fail = |msg: String| println!("{}", serde_json::json!({ "error": msg, "machines": [] }));
-    let raw = match std::fs::read_to_string(&path) {
-        Ok(s) => s,
-        Err(e) => return fail(format!("cannot read {}: {e}", path.display())),
-    };
-    let parsed = match parse_machines(&raw) {
+    let parsed = match remote::load_parsed() {
         Ok(p) => p,
-        Err(e) => return fail(format!("invalid config in {}: {e}", path.display())),
+        Err(e) => {
+            return remote::print_json(serde_json::json!({ "error": e, "machines": [] }))
+        }
     };
     let now = chrono::Utc::now().timestamp();
     let results: Vec<QueryResult> = std::thread::scope(|s| {
@@ -1320,6 +1346,10 @@ fn main() {
         Some("open") => cmd_open(),
         Some("refresh") => cmd_refresh(),
         Some("snapshot") => cmd_snapshot(),
+        Some("job") => jobcmd::cmd_job(),
+        Some("action") => jobcmd::cmd_action(),
+        Some("final") => jobcmd::cmd_final(),
+        Some("cluster") => cluster::cmd_cluster(),
         Some("start") => cmd_start(),
         Some("stop") => cmd_stop(),
         Some("daemon") => cmd_daemon(),
@@ -1335,6 +1365,58 @@ fn _unused(_p: &Path) {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn storage_key_parses_and_rejects_dotdot() {
+        let parsed = parse_machines(
+            r#"
+[[machine]]
+name = "Ok"
+host = "ok"
+user = "sam"
+storage = ["$HOME", "/mnt/scratch"]
+
+[[machine]]
+name = "X"
+host = "x"
+user = "sam"
+storage = ["/a/../b"]
+
+[[machine]]
+name = "Bare"
+host = "bare"
+user = "sam"
+"#,
+        )
+        .unwrap();
+        assert_eq!(parsed.machines.len(), 2);
+        assert_eq!(parsed.machines[0].storage, ["$HOME", "/mnt/scratch"]);
+        assert!(parsed.machines[1].storage.is_empty());
+        assert_eq!(
+            parsed.warnings,
+            ["skipping machine 'X': invalid storage path '/a/../b'"]
+        );
+        for bad in [r#"storage = "/a""#, "storage = [1]", r#"storage = ["/a;rm"]"#, r#"storage = [""]"#] {
+            let entry: toml::Value =
+                toml::from_str(&format!("host = \"h\"\nuser = \"u\"\n{bad}")).unwrap();
+            assert!(parse_machine_entry(&entry).is_err(), "{bad}");
+        }
+        for good in ["/scratch/$USER", "~/x", "$HOMEx"] {
+            let entry: toml::Value = toml::from_str(&format!(
+                "host = \"h\"\nuser = \"u\"\nstorage = [\"{good}\"]"
+            ))
+            .unwrap();
+            assert_eq!(parse_machine_entry(&entry).unwrap().storage, [good], "{good}");
+        }
+    }
+
+    #[test]
+    fn snapshot_includes_ssh_target() {
+        let entry: toml::Value =
+            toml::from_str("host = \"h\"\nuser = \"u\"\nssh_user = \"me\"").unwrap();
+        let m = parse_machine_entry(&entry).unwrap();
+        assert_eq!(machine_snapshot(&m, &Ok(vec![]), 0)["ssh_target"], "me@h");
+    }
 
     #[test]
     fn mixed_valid_and_invalid_machines_preserve_valid_entries_and_name_warning() {
@@ -1795,6 +1877,7 @@ scheduler_command = "{command}"
             scheduler_command: "squeue".into(),
             ssh_user: None,
             session: String::new(),
+            storage: Vec::new(),
         };
         let pbs = Machine {
             scheduler: Scheduler::Pbs,
@@ -1862,6 +1945,7 @@ session = "{session}"
             scheduler_command: "squeue".into(),
             ssh_user: None,
             session: "agents".into(),
+            storage: Vec::new(),
         };
         let default_machine = Machine {
             session: String::new(),

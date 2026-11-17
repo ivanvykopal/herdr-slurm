@@ -114,6 +114,18 @@ remote query is terminated after 15 seconds.
 Scheduler capture retains at most 8 MiB of stdout and 1 MiB of stderr while
 continuing to drain both streams, then reports oversized output as an error.
 
+`storage` (optional) lists remote paths whose disk use the desktop mod's
+cluster strip shows (`herdr-slurm cluster`):
+
+```toml
+storage = ["$HOME", "/mnt/scratch", "/project/my-proj"]
+```
+
+Each path must be non-empty, use only `[A-Za-z0-9_./~$-]`, and contain no
+`..` segment; `$HOME`/`$USER` and a leading `~` expand on the cluster. An
+invalid path skips the machine with a warning. When omitted, the defaults are
+`$HOME`, `/scratch`, `/mnt/scratch` and `/project` (missing paths are skipped).
+
 ## Actions
 
 | Action | What it does |
@@ -130,6 +142,21 @@ type = "plugin_action"
 command = "ivan.herdr-slurm.open-windows" # use ...open on linux/macos
 description = "Scheduler jobs sidebar"
 ```
+
+## Subcommands
+
+| Command | What it does |
+|---|---|
+| `herdr-slurm` (no argument) | Interactive job table for a herdr pane |
+| `herdr-slurm open` | Open/focus the jobs sidebar pane |
+| `herdr-slurm refresh` | One-shot snapshot of every machine, printed as text |
+| `herdr-slurm snapshot` | Poll every machine once in parallel, print one JSON document |
+| `herdr-slurm job <machine> <id> [--lines N] [--gpu]` | One job as JSON: state, allocation, log paths and tails (N lines, default 50, max 500), step usage; `--gpu` adds live GPU use |
+| `herdr-slurm action <machine> <id> <cancel\|requeue\|hold\|release>` | Run `scancel`/`scontrol` (Slurm) or `qdel`/`qrerun`/`qhold`/`qrls` (PBS) and print `{error, ok, output}` |
+| `herdr-slurm final <machine> <id>...` | Final state and exit code of up to 50 ended jobs; unresolved ids give `UNKNOWN` |
+| `herdr-slurm cluster` | Per machine: free/total GPUs per partition, pending start estimates, storage use and quota |
+| `herdr-slurm start` / `stop` | Start / stop the background sidebar-token daemon |
+| `herdr-slurm daemon` | The daemon itself (spawned by `start`) |
 
 ## Notes
 
@@ -150,7 +177,7 @@ in parallel and prints one JSON document. See [RECIPE.md](RECIPE.md).
 Install:
 
 ```sh
-cargo install --path .                      # puts herdr-slurm on PATH
+cargo install --path . --locked             # puts herdr-slurm (with job/action/final/cluster) on PATH
 cp -R mods/slurm ~/.config/herdr-app/mods/
 herdr-app check ~/.config/herdr-app/mods/slurm
 ```
