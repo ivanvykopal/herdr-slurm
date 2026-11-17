@@ -88,7 +88,7 @@ Output:
     "account": "perun2601397", "title": "Slovak LLM Benchmarking", "active": true,
     "cpu":  { "used": 712,  "awarded": 88474, "used_30d": 712,  "mine": 712 },
     "gpu":  { "used": 3120, "awarded": 7964,  "used_30d": 446,  "mine": 446 },
-    "storage": { "path": "/mnt/project", "used_kb": 6680000000, "limit_kb": 10490000000, "pct": 63 }
+    "storage": { "path": "/mnt/project", "used_kb": 6680000000, "limit_kb": 10490000000, "pct": 64 }
   }],
   "quotas": [{ "kind": "user", "name": "ivvyke441", "path": "/mnt/home", "used_kb": 221249536, "limit_kb": 524288000, "pct": 42 }],
   "raw": { "sprojects": null, "myquota": null, "perunfsusage": null }
