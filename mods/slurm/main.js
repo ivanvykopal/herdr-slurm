@@ -1,7 +1,7 @@
 import { View, div } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
 import { exec, theme, props, shared, setShared, notify, playSound, checking } from "herdr";
-import { endedJobs, storageAlerts, shouldLead, jobNotice, storageNotice, adoptState } from "./logic.js";
+import { endedJobs, storageAlerts, shouldLead, mustAdopt, jobNotice, storageNotice, adoptState } from "./logic.js";
 
 const TICK_MS = 5000;
 const SNAPSHOT_MS = 20000;
@@ -59,7 +59,9 @@ export default class Slurm extends View {
       this.leading = false;
       return;
     }
-    if (!this.leading) {
+    // Adopt before writing our lease: covers a copy that silently lost the lease while its
+    // ticks stalled (another copy led and notified meanwhile), not only a fresh leader.
+    if (mustAdopt(this.leading, shared(LEASE), this.copy)) {
       const st = shared(STATE);
       ({ running: this.running, armed: this.armed } = adoptState(st, now));
       this.snapshot = st?.snapshot ?? null;
