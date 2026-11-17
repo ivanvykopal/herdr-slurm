@@ -1,0 +1,141 @@
+@@sshare
+perun25012246|0|0.000000
+perun250128|0|0.000000
+perun2601397|1056262|1.000000
+perun2601474|0|0.000000
+perun2601475|0|0.000000
+perun2601476|0|0.000000
+@@sreport
+--------------------------------------------------------------------------------
+Cluster/Account/User Utilization 2024-01-01T00:00:00 - 2026-11-17T13:59:59 (90856800 secs)
+Usage reported in TRES Hours
+--------------------------------------------------------------------------------
+Cluster|Account|Login|Proper Name|TRES Name|Used
+slurm-perun2|perun25012246|||cpu|14111
+slurm-perun2|perun25012246|||gres/gpu|3909
+slurm-perun2|perun25012246|||billing|18020
+slurm-perun2|perun25012246|ivvyke441|Ivan Vykopal|cpu|14111
+slurm-perun2|perun25012246|ivvyke441|Ivan Vykopal|gres/gpu|3909
+slurm-perun2|perun25012246|ivvyke441|Ivan Vykopal|billing|18020
+slurm-perun2|perun250128|||cpu|56588
+slurm-perun2|perun250128|||gres/gpu|8247
+slurm-perun2|perun250128|||billing|64835
+slurm-perun2|perun250128|user1|User One|cpu|24659
+slurm-perun2|perun250128|user1|User One|gres/gpu|1645
+slurm-perun2|perun250128|user1|User One|billing|26303
+slurm-perun2|perun250128|ivvyke441|Ivan Vykopal|cpu|1
+slurm-perun2|perun250128|ivvyke441|Ivan Vykopal|gres/gpu|0
+slurm-perun2|perun250128|ivvyke441|Ivan Vykopal|billing|1
+slurm-perun2|perun250128|user2|User Two|cpu|29
+slurm-perun2|perun250128|user2|User Two|gres/gpu|24
+slurm-perun2|perun250128|user2|User Two|billing|53
+slurm-perun2|perun250128|user3|User Three|cpu|27727
+slurm-perun2|perun250128|user3|User Three|gres/gpu|2684
+slurm-perun2|perun250128|user3|User Three|billing|30410
+slurm-perun2|perun250128|user4|User Four|cpu|4173
+slurm-perun2|perun250128|user4|User Four|gres/gpu|3895
+slurm-perun2|perun250128|user4|User Four|billing|8068
+slurm-perun2|perun2601397|||cpu|8154
+slurm-perun2|perun2601397|||gres/gpu|5253
+slurm-perun2|perun2601397|||billing|13407
+slurm-perun2|perun2601397|ivvyke441|Ivan Vykopal|cpu|8154
+slurm-perun2|perun2601397|ivvyke441|Ivan Vykopal|gres/gpu|5253
+slurm-perun2|perun2601397|ivvyke441|Ivan Vykopal|billing|13407
+slurm-perun2|perun2601474|||cpu|3953
+slurm-perun2|perun2601474|||gres/gpu|413
+slurm-perun2|perun2601474|||billing|4365
+slurm-perun2|perun2601474|user1|User One|cpu|1536
+slurm-perun2|perun2601474|user1|User One|gres/gpu|297
+slurm-perun2|perun2601474|user1|User One|billing|1833
+slurm-perun2|perun2601474|ivvyke441|Ivan Vykopal|cpu|2392
+slurm-perun2|perun2601474|ivvyke441|Ivan Vykopal|gres/gpu|113
+slurm-perun2|perun2601474|ivvyke441|Ivan Vykopal|billing|2504
+slurm-perun2|perun2601474|user5|User Five|cpu|2
+slurm-perun2|perun2601474|user5|User Five|gres/gpu|0
+slurm-perun2|perun2601474|user5|User Five|billing|3
+slurm-perun2|perun2601474|user6|User Six|cpu|22
+slurm-perun2|perun2601474|user6|User Six|gres/gpu|3
+slurm-perun2|perun2601474|user6|User Six|billing|25
+slurm-perun2|perun2601475|||cpu|15
+slurm-perun2|perun2601475|||gres/gpu|2
+slurm-perun2|perun2601475|||billing|17
+slurm-perun2|perun2601475|user7|User Seven|cpu|15
+slurm-perun2|perun2601475|user7|User Seven|gres/gpu|2
+slurm-perun2|perun2601475|user7|User Seven|billing|17
+slurm-perun2|perun2601476|||cpu|12674
+slurm-perun2|perun2601476|||gres/gpu|3233
+slurm-perun2|perun2601476|||billing|15907
+slurm-perun2|perun2601476|ivvyke441|Ivan Vykopal|cpu|12674
+slurm-perun2|perun2601476|ivvyke441|Ivan Vykopal|gres/gpu|3233
+slurm-perun2|perun2601476|ivvyke441|Ivan Vykopal|billing|15907
+@@sreport30
+Invalid time specification (pos=1): -30days
+--------------------------------------------------------------------------------
+Cluster/Account/User Utilization 2026-11-16T00:00:00 - 2026-11-17T13:59:59 (136800 secs)
+Usage reported in TRES Hours
+--------------------------------------------------------------------------------
+Cluster|Account|Login|Proper Name|TRES Name|Used
+slurm-perun2|perun2601474|||cpu|579
+slurm-perun2|perun2601474|||gres/gpu|72
+slurm-perun2|perun2601474|||billing|652
+slurm-perun2|perun2601474|user1|User One|cpu|579
+slurm-perun2|perun2601474|user1|User One|gres/gpu|72
+slurm-perun2|perun2601474|user1|User One|billing|652
+@@qos
+perun25012246|cpu=10616820,gres/gpu=336960
+perun250128|cpu=5308080,gres/gpu=712200
+perun2601397|cpu=5308440,gres/gpu=477840
+perun2601474|cpu=2654220,gres/gpu=336960
+perun2601475|cpu=5308440,gres/gpu=336960
+perun2601476|cpu=5308440,gres/gpu=336960
+@@assoc
+perun25012246|node=0
+perun250128|node=0
+perun2601397|cpu=1024,gres/gpu=32
+perun2601474|cpu=1024,gres/gpu=32
+perun2601475|cpu=1024,gres/gpu=32
+perun2601476|cpu=1024,gres/gpu=32
+@@perunfsusage
+STORAGE USAGE FOR ivvyke441
+Generated: 2026-11-17 10:30:30
+
+Type      Name                 File system      Space used  Space limit     Used Status   
+----------------------------------------------------------------------------------------------------
+User      ivvyke441            /mnt/home            211 GB       500 GB    42.1%          [########............]
+User      ivvyke441            /mnt/scratch        4.00 KB          TBD        -          
+Project   perun25012246        /mnt/project        4.00 KB          TBD        - inactive 
+Project   perun250128          /mnt/project        4.00 KB          TBD        - inactive 
+Project   perun2601474         /mnt/project         676 GB      1000 GB    67.6% active   [#############.......]
+              Beyond Just Scaling: Insight-Driven Advances for Low-Resource AI
+Project   perun2601476         /mnt/project        1.01 TB      4.88 TB    20.7% active   [####................]
+              Next Generation SlovakBERT
+Project   perun2601475         /mnt/project        28.7 TB      29.3 TB    97.8% active   [###################.]
+              Vision-Language Model Adaptation to the Slovak Language
+Project   perun2601397         /mnt/project        6.22 TB      9.77 TB    63.7% active   [############........]
+              Slovak LLM Benchmarking
+
+Your data:     211 GB
+Project data:  36.5 TB
+
+NOTE: 2 of your projects are marked inactive (from a previous year).
+      Please archive or clean up data you no longer need.
+
+This file is regenerated automatically. Command: perunfsusage
+
+SLURM LIMITS FOR ivvyke441
+-----------------------------------------------------------------------------------------------
+  Running jobs at once                 20
+  Jobs in queue (incl. running)        50
+  GPUs in use at once                  32
+  CPUs in use at once                  1024
+  Nodes in use at once                 unlimited
+  GPUs in a single job                 32
+  CPUs in a single job                 1024
+  Array jobs at once                   10
+  Running tasks of one array job       400
+  Choose nodes (--nodelist/--exclude)  no
+
+  Limits apply to you in each of your projects separately.
+  Every task of an array job counts as one job in the queue limit.
+  Jobs above the limits wait in the queue (see: squeue -u $USER -o "%i %T %r").
+  Limits updated: 2026-11-17 13:20

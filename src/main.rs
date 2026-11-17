@@ -7,6 +7,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 mod cluster;
 mod jobcmd;
+mod projects;
 mod remote;
 
 const REFRESH_SECS: u64 = 20;
