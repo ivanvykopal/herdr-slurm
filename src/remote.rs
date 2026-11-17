@@ -114,6 +114,21 @@ pub fn load_parsed() -> Result<ParsedMachines, String> {
     parse_machines(&raw).map_err(|e| format!("invalid config in {}: {e}", path.display()))
 }
 
+/// Script prefix exporting the machine's `slurm_conf` (validated at config
+/// load; leading `~` → `$HOME`), or `""` when unset.
+pub fn prelude(m: &Machine) -> String {
+    match &m.slurm_conf {
+        None => String::new(),
+        Some(p) => {
+            let p = match p.strip_prefix('~') {
+                Some(rest) => format!("$HOME{rest}"),
+                None => p.clone(),
+            };
+            format!("export SLURM_CONF=\"{p}\"; ")
+        }
+    }
+}
+
 pub fn print_json(v: serde_json::Value) {
     println!("{v}");
 }
