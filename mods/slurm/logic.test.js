@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   endedJobs, notifyLevel, gpuUnderuse, storageColorKey, storagePct,
-  storageAlerts, formatStart, shouldLead, jobNotice, storageNotice, adoptState,
+  storageAlerts, formatStart, shouldLead, jobNotice, storageNotice, adoptState, mustAdopt,
 } from "./logic.js";
 
 const job = (id, state, name = "j" + id) => ({ id, name, state });
@@ -149,4 +149,12 @@ test("adoptState takes fresh state only", () => {
   assert.deepEqual(adoptState(st, 1000 + 120000), { running: null, armed: {} });
   assert.deepEqual(adoptState(null, 5), { running: null, armed: {} });
   assert.deepEqual(adoptState({ updated_at: 1000 }, 1001), { running: null, armed: {} });
+});
+
+test("mustAdopt when not leading or lease held by another copy", () => {
+  assert.equal(mustAdopt(false, { copy: "me", at: 1 }, "me"), true);
+  assert.equal(mustAdopt(true, null, "me"), true);
+  // Watcher stalled; a panel copy took the lease meanwhile: re-adopt its maps.
+  assert.equal(mustAdopt(true, { copy: "panel", at: 1 }, "me"), true);
+  assert.equal(mustAdopt(true, { copy: "me", at: 1 }, "me"), false);
 });

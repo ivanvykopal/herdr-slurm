@@ -95,6 +95,13 @@ export function shouldLead(lease, me, now, isWatcher) {
   return Boolean(isWatcher && !lease.watch);
 }
 
+// Adopt the shared maps when this copy is not leading yet, or when another copy held the
+// lease in between (e.g. a stalled watcher whose lease a panel copy took): our own maps
+// are stale then and would repeat that copy's notifications.
+export function mustAdopt(leading, lease, me) {
+  return !leading || lease?.copy !== me;
+}
+
 // `fin` is the job's entry from `herdr-slurm final`, or null when it could not be resolved.
 export function jobNotice(entry, fin) {
   const state = fin?.state || "UNKNOWN";
