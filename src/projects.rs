@@ -2,9 +2,14 @@
 //! compute hours, and user / project storage quotas.
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
+use std::time::Duration;
+
+use serde_json::{json, Value};
+
+use crate::remote::{load_parsed, prelude, print_json, run_remote, sections, tool};
+use crate::{Machine, Scheduler};
 
 /// Awarded hours from a QOS `GrpTRESMins` (`<acct>_gpu` folded in).
-#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub(crate) struct Award {
     pub cpu_h: Option<u64>,
@@ -13,7 +18,6 @@ pub(crate) struct Award {
 }
 
 /// Used hours of one account from `sreport … AccountUtilizationByUser`.
-#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub(crate) struct Usage {
     pub cpu: Option<u64>,
@@ -24,7 +28,6 @@ pub(crate) struct Usage {
 }
 
 /// One project of `sprojects -f` (hours).
-#[allow(dead_code)]
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct SProject {
     pub account: String,
@@ -36,7 +39,6 @@ pub(crate) struct SProject {
 }
 
 /// A user storage quota row (`myquota` / `perunfsusage`).
-#[allow(dead_code)]
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Quota {
     pub kind: &'static str,
@@ -49,7 +51,6 @@ pub(crate) struct Quota {
 
 /// A `perunfsusage` Project row; kept with a `TBD` limit (as `None`) so its
 /// active / inactive status stays known.
-#[allow(dead_code)]
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct ProjectStorage {
     pub account: String,
@@ -124,7 +125,6 @@ fn is_name(s: &str) -> bool {
 
 /// Account names from `sshare --parsable2` lines `Account|RawUsage|…`, in
 /// first-seen order without duplicates.
-#[allow(dead_code)]
 pub(crate) fn parse_accounts(sshare: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for line in sshare.lines() {
@@ -138,7 +138,6 @@ pub(crate) fn parse_accounts(sshare: &str) -> Vec<String> {
 }
 
 /// Accounts whose association `GrpTRES` (`acct|GrpTRES`) contains `node=0`.
-#[allow(dead_code)]
 pub(crate) fn parse_expired(assoc: &str) -> HashSet<String> {
     assoc
         .lines()
@@ -152,7 +151,6 @@ pub(crate) fn parse_expired(assoc: &str) -> HashSet<String> {
 
 /// QOS lines `name|GrpTRESMins` → awarded hours per account; `<acct>_gpu`
 /// folds into `<acct>` (amounts summed); minutes / 60, rounded.
-#[allow(dead_code)]
 pub(crate) fn parse_awards(qos: &str) -> HashMap<String, Award> {
     #[derive(Default)]
     struct Mins {
@@ -191,7 +189,6 @@ pub(crate) fn parse_awards(qos: &str) -> HashMap<String, Award> {
 /// `Cluster|Account|Login|Proper Name|TRES Name|Used` → usage per account.
 /// Totals come only from empty-Login rows, `mine_*` from Login == `me`;
 /// header, separator and error lines are ignored.
-#[allow(dead_code)]
 pub(crate) fn parse_sreport(text: &str, me: &str) -> HashMap<String, Usage> {
     #[derive(Default)]
     struct Acc {
@@ -240,7 +237,6 @@ pub(crate) fn parse_sreport(text: &str, me: &str) -> HashMap<String, Usage> {
 /// continuation rows `|  | GPU: used/awarded | …`, under the ACTIVE or
 /// INACTIVE PROJECTS heading. `None` when the text is non-empty but no
 /// project row parsed.
-#[allow(dead_code)]
 pub(crate) fn parse_sprojects(text: &str) -> Option<Vec<SProject>> {
     let text = strip_ansi(text);
     let mut out: Vec<SProject> = Vec::new();
@@ -293,7 +289,6 @@ pub(crate) fn parse_sprojects(text: &str) -> Option<Vec<SProject>> {
 
 /// `myquota` user rows `user <name> (<id>) <path> : <used> / <pct>% <limit> | …`.
 /// `None` when the text is non-empty but no user row parsed.
-#[allow(dead_code)]
 pub(crate) fn parse_myquota(text: &str) -> Option<Vec<Quota>> {
     let text = strip_ansi(text);
     let mut out = Vec::new();
@@ -322,7 +317,6 @@ pub(crate) fn parse_myquota(text: &str) -> Option<Vec<Quota>> {
 /// an indented line right under a Project row is its title. User rows with
 /// limit `TBD` are dropped; Project rows are kept with `limit_kb: None`.
 /// `None` when the text is non-empty but no row parsed.
-#[allow(dead_code)]
 pub(crate) fn parse_perunfsusage(text: &str) -> Option<(Vec<Quota>, Vec<ProjectStorage>)> {
     let text = strip_ansi(text);
     let (mut users, mut projects) = (Vec::new(), Vec::<ProjectStorage>::new());
@@ -374,7 +368,6 @@ pub(crate) fn parse_perunfsusage(text: &str) -> Option<(Vec<Quota>, Vec<ProjectS
 }
 
 /// `4.00 KB`, `211 GB`, `1.01 TB`, `863GB` → KiB (units are powers of 1024).
-#[allow(dead_code)]
 pub(crate) fn parse_size_kib(s: &str) -> Option<u64> {
     let s = s.trim();
     let split = s.find(|c: char| !(c.is_ascii_digit() || c == '.')).unwrap_or(s.len());
@@ -404,6 +397,164 @@ fn take_size(f: &[&str], i: &mut usize) -> Option<u64> {
     let v = size_kib(first, f.get(*i + 1)?)?;
     *i += 2;
     Some(v)
+}
+
+/// One script with sections `sshare`, `assoc`, `qos`, `sreport`,
+/// `sreport30`, `sprojects`, `myquota`, `perunfsusage` and `end`. The
+/// account list (and its `_gpu` QOS names) is built remotely from sshare;
+/// the QOS and sreport queries are skipped when it is empty.
+pub(crate) fn build_projects_script(m: &Machine) -> String {
+    let u = &m.scheduler_user;
+    let (sshare, sacctmgr, sreport) = (tool(m, "sshare"), tool(m, "sacctmgr"), tool(m, "sreport"));
+    let report = |start: &str| {
+        format!(
+            "[ -n \"$a\" ] && {sreport} cluster AccountUtilizationByUser Start={start} End=now \
+             -t Hour -T cpu,gres/gpu,billing --parsable2 account=\"$a\" 2>&1\n"
+        )
+    };
+    let mut s = prelude(m);
+    s.push_str(&format!(
+        "echo '@@herdr:sshare@@'\n\
+         s=$({sshare} -U -u {u} --noheader --parsable2 --format=Account,RawUsage 2>&1); printf '%s\\n' \"$s\"\n\
+         a=$(printf '%s\\n' \"$s\" | grep '|' | cut -d'|' -f1 | tr -d ' ' | grep -v '^$' | paste -sd, -)\n\
+         g=$(printf '%s' \"$a\" | sed 's/,/_gpu,/g; s/$/_gpu/')\n\
+         echo '@@herdr:assoc@@'\n\
+         {sacctmgr} -n show assoc user={u} format=Account,GrpTRES --parsable2 2>&1\n\
+         echo '@@herdr:qos@@'\n\
+         [ -n \"$a\" ] && {sacctmgr} -n show qos \"$a,$g\" format=Name,GrpTRESMins --parsable2 2>&1\n\
+         echo '@@herdr:sreport@@'\n{}\
+         echo '@@herdr:sreport30@@'\n{}\
+         echo '@@herdr:sprojects@@'\ncommand -v sprojects >/dev/null && sprojects -f 2>&1\n\
+         echo '@@herdr:myquota@@'\ncommand -v myquota >/dev/null && myquota 2>&1\n\
+         echo '@@herdr:perunfsusage@@'\ncommand -v perunfsusage >/dev/null && perunfsusage 2>&1\n\
+         echo '@@herdr:end@@'\n",
+        report("2020-01-01"),
+        report("$(date -d '30 days ago' +%F)"),
+    ));
+    s
+}
+
+/// `pct` when known, else `used / limit` rounded.
+fn fill_pct(pct: Option<u8>, used_kb: u64, limit_kb: u64) -> Option<u64> {
+    pct.map(u64::from)
+        .or_else(|| (limit_kb > 0).then(|| (used_kb as f64 * 100.0 / limit_kb as f64).round() as u64))
+}
+
+fn quota_json(q: &Quota) -> Value {
+    json!({ "kind": q.kind, "name": q.name, "path": q.path, "used_kb": q.used_kb,
+            "limit_kb": q.limit_kb, "pct": fill_pct(q.pct, q.used_kb, q.limit_kb) })
+}
+
+/// Section text when non-empty but unparsed (`ok` false), else `None`.
+fn raw(text: &str, ok: bool) -> Option<&str> {
+    (!ok && !text.trim().is_empty()).then_some(text)
+}
+
+/// The machine's `projects` entry from the sections of a completed run.
+pub(crate) fn machine_json(m: &Machine, secs: &HashMap<String, String>) -> Value {
+    let get = |k: &str| secs.get(k).map_or("", String::as_str);
+    let me = m.scheduler_user.as_str();
+    let expired = parse_expired(get("assoc"));
+    let awards = parse_awards(get("qos"));
+    let (sr, sr30) = (parse_sreport(get("sreport"), me), parse_sreport(get("sreport30"), me));
+    let sp = parse_sprojects(get("sprojects"))
+        .filter(|v| v.iter().any(|p| p.cpu_awarded.is_some() || p.gpu_awarded.is_some()));
+    let myquota = parse_myquota(get("myquota"));
+    let fsusage = parse_perunfsusage(get("perunfsusage"));
+    let (fs_users, fs_projects) = fsusage.clone().unwrap_or_default();
+
+    // Account-total hours of `acct` in a sreport section: 0 when the section
+    // has totals for some account but none for this one (zero rows omitted).
+    let total = |r: &HashMap<String, Usage>, acct: &str, gpu: bool| -> Option<u64> {
+        match r.get(acct) {
+            Some(u) if u.has_totals => Some(if gpu { u.gpu } else { u.cpu }.unwrap_or(0)),
+            None if r.values().any(|u| u.has_totals) => Some(0),
+            _ => None,
+        }
+    };
+    let projects: Vec<Value> = parse_accounts(get("sshare"))
+        .into_iter()
+        .filter(|a| !expired.contains(a))
+        .filter(|a| sp.as_ref().is_none_or(|v| v.iter().any(|p| p.active && &p.account == a)))
+        .filter(|a| !fs_projects.iter().any(|p| &p.account == a && !p.active))
+        .map(|acct| {
+            let s = sp.as_ref().and_then(|v| v.iter().find(|p| p.account == acct));
+            let award = awards.get(&acct).copied().unwrap_or_default();
+            let mine = sr30.get(&acct);
+            let hours = |gpu: bool| {
+                let (used, awarded) = match s {
+                    Some(p) if gpu => (p.gpu_used, p.gpu_awarded),
+                    Some(p) => (p.cpu_used, p.cpu_awarded),
+                    None if gpu => (total(&sr, &acct, true), award.gpu_h),
+                    None => (total(&sr, &acct, false), award.cpu_h),
+                };
+                json!({ "used": used, "awarded": awarded, "used_30d": total(&sr30, &acct, gpu),
+                        "mine": mine.and_then(|u| if gpu { u.mine_gpu } else { u.mine_cpu }) })
+            };
+            let fs = fs_projects.iter().find(|p| p.account == acct);
+            let storage = fs.and_then(|p| {
+                let limit = p.limit_kb?;
+                Some(json!({ "path": p.path, "used_kb": p.used_kb, "limit_kb": limit,
+                             "pct": fill_pct(p.pct, p.used_kb, limit) }))
+            });
+            json!({ "account": acct, "title": fs.and_then(|p| p.title.clone()), "active": true,
+                    "cpu": hours(false), "gpu": hours(true), "storage": storage })
+        })
+        .collect();
+    let quotas: Vec<Value> = myquota.iter().flatten().chain(&fs_users).map(quota_json).collect();
+    json!({
+        "name": m.name, "error": null,
+        "source": if sp.is_some() { "sprojects" } else { "sreport" },
+        "projects": projects, "quotas": quotas,
+        "raw": {
+            "sprojects": raw(get("sprojects"), sp.is_some()),
+            "myquota": raw(get("myquota"), myquota.is_some()),
+            "perunfsusage": raw(get("perunfsusage"), fsusage.is_some()),
+        },
+    })
+}
+
+/// The fixed entry of a scheduler `projects` does not support (PBS).
+fn unsupported_json(m: &Machine) -> Option<Value> {
+    (m.scheduler == Scheduler::Pbs)
+        .then(|| json!({ "name": m.name, "error": null, "projects": [], "quotas": [], "unsupported": "pbs" }))
+}
+
+fn error_json(m: &Machine, e: &str) -> Value {
+    json!({ "name": m.name, "error": e, "source": null, "projects": [], "quotas": [],
+            "raw": { "sprojects": null, "myquota": null, "perunfsusage": null } })
+}
+
+fn query(m: &Machine) -> Value {
+    if let Some(v) = unsupported_json(m) {
+        return v;
+    }
+    let out = match run_remote(m, &build_projects_script(m), Duration::from_secs(60)) {
+        Ok(o) => o,
+        Err(e) => return error_json(m, &e),
+    };
+    let secs = sections(&out.stdout);
+    if !secs.contains_key("end") {
+        let e = out.stderr.lines().rev().map(str::trim).find(|l| !l.is_empty());
+        return error_json(m, e.unwrap_or("no output from cluster"));
+    }
+    machine_json(m, &secs)
+}
+
+pub fn cmd_projects() {
+    let parsed = match load_parsed() {
+        Ok(p) => p,
+        Err(e) => return print_json(json!({ "error": e, "machines": [] })),
+    };
+    let machines: Vec<Value> = std::thread::scope(|s| {
+        let handles: Vec<_> = parsed.machines.iter().map(|m| s.spawn(move || query(m))).collect();
+        handles
+            .into_iter()
+            .zip(&parsed.machines)
+            .map(|(h, m)| h.join().unwrap_or_else(|_| error_json(m, "query panicked")))
+            .collect()
+    });
+    print_json(json!({ "error": null, "machines": machines }));
 }
 
 #[cfg(test)]
@@ -595,5 +746,131 @@ mod tests {
         assert_eq!(parse_size_kib("2 MB"), Some(2048));
         assert_eq!(parse_size_kib("TBD"), None);
         assert_eq!(parse_size_kib("12 XB"), None);
+    }
+
+    fn machine(name: &str, user: &str, extra: &str) -> crate::Machine {
+        let entry: toml::Value =
+            toml::from_str(&format!("name = \"{name}\"\nhost = \"h\"\nscheduler_user = \"{user}\"\n{extra}"))
+                .unwrap();
+        crate::parse_machine_entry(&entry).unwrap()
+    }
+
+    /// All `@@<name>` sections of a fixture, as `remote::sections` would give.
+    fn secs(text: &str) -> HashMap<String, String> {
+        let mut out: HashMap<String, String> = text
+            .lines()
+            .filter_map(|l| l.strip_prefix("@@"))
+            .map(|n| (n.trim().to_string(), section(text, n.trim()).trim_end().to_string()))
+            .collect();
+        out.insert("end".into(), String::new());
+        out
+    }
+
+    fn perun() -> Value {
+        machine_json(&machine("Perun", "ivvyke441", ""), &secs(PERUN))
+    }
+
+    fn devana() -> Value {
+        machine_json(&machine("Devana", "ivykopal", ""), &secs(DEVANA))
+    }
+
+    fn accounts(v: &Value) -> Vec<&str> {
+        v["projects"].as_array().unwrap().iter().map(|p| p["account"].as_str().unwrap()).collect()
+    }
+
+    fn project<'a>(v: &'a Value, acct: &str) -> &'a Value {
+        v["projects"].as_array().unwrap().iter().find(|p| p["account"] == acct).unwrap()
+    }
+
+    #[test]
+    fn script_has_sections_and_30d_date() {
+        let s = build_projects_script(&machine("P", "u", ""));
+        let mut at = 0;
+        for name in ["sshare", "assoc", "qos", "sreport", "sreport30", "sprojects", "myquota", "perunfsusage", "end"] {
+            let i = s.find(&format!("echo '@@herdr:{name}@@'")).unwrap_or_else(|| panic!("{name}"));
+            assert!(i >= at, "{name} out of order");
+            at = i;
+        }
+        assert!(s.contains("Start=2020-01-01"));
+        assert!(s.contains("Start=$(date -d '30 days ago' +%F)"));
+        assert!(!s.contains("-30days"));
+        assert!(s.contains("_gpu") && s.contains("paste -sd,"));
+        assert!(s.contains("-u u ") && s.contains("user=u "));
+        assert!(s.starts_with("echo '@@herdr:sshare@@'"));
+        let conf = build_projects_script(&machine("P", "u", "slurm_conf = \"~/c.conf\""));
+        assert!(conf.starts_with("export SLURM_CONF=\"$HOME/c.conf\"; echo '@@herdr:sshare@@'"));
+    }
+
+    #[test]
+    fn expired_accounts_are_omitted() {
+        assert_eq!(accounts(&perun()), vec!["perun2601397", "perun2601474", "perun2601475", "perun2601476"]);
+    }
+
+    #[test]
+    fn perun_project_json() {
+        let v = perun();
+        assert_eq!(v["error"], Value::Null);
+        assert_eq!(v["source"], "sreport");
+        let p = project(&v, "perun2601397");
+        assert_eq!(p["title"], "Slovak LLM Benchmarking");
+        assert_eq!(p["active"], true);
+        assert_eq!(p["gpu"], json!({ "used": 5253, "awarded": 7964, "used_30d": 0, "mine": null }));
+        assert_eq!(p["cpu"]["awarded"], 88474);
+        assert_eq!(p["storage"]["pct"], 64);
+        assert_eq!(p["storage"]["path"], "/mnt/project");
+        let busy = project(&v, "perun2601474");
+        assert_eq!((busy["gpu"]["used_30d"].as_u64(), busy["cpu"]["used_30d"].as_u64()), (Some(72), Some(579)));
+        assert_eq!(v["raw"], json!({ "sprojects": null, "myquota": null, "perunfsusage": null }));
+    }
+
+    #[test]
+    fn devana_project_json() {
+        let v = devana();
+        assert_eq!(v["source"], "sprojects");
+        assert_eq!(accounts(&v), vec!["p1605-25-3", "p1626-25-3"]);
+        let p = project(&v, "p1605-25-3");
+        assert_eq!(p["gpu"], json!({ "used": 7090, "awarded": 20000, "used_30d": null, "mine": null }));
+        assert_eq!(p["cpu"]["used"], 1947);
+        assert_eq!((p["title"].clone(), p["storage"].clone()), (Value::Null, Value::Null));
+    }
+
+    #[test]
+    fn unparseable_sprojects_goes_to_raw() {
+        let mut s = secs(DEVANA);
+        s.insert("sprojects".into(), "garbage\nlines".into());
+        let v = machine_json(&machine("Devana", "ivykopal", ""), &s);
+        assert_eq!(v["source"], "sreport");
+        assert_eq!(v["raw"]["sprojects"], "garbage\nlines");
+        assert_eq!(accounts(&v), vec!["p122-23-t", "p1605-25-3", "p1626-25-3", "p365-23-1", "p904-24-3"]);
+        let p = project(&v, "p1605-25-3");
+        assert_eq!(p["gpu"], json!({ "used": null, "awarded": null, "used_30d": null, "mine": null }));
+    }
+
+    #[test]
+    fn quotas_listed() {
+        let d = devana();
+        assert_eq!(d["quotas"].as_array().unwrap().len(), 1);
+        assert_eq!((d["quotas"][0]["path"].clone(), d["quotas"][0]["pct"].clone()), (json!("/home"), json!(86)));
+        let p = perun();
+        assert_eq!(p["quotas"].as_array().unwrap().len(), 1);
+        assert_eq!((p["quotas"][0]["path"].clone(), p["quotas"][0]["pct"].clone()), (json!("/mnt/home"), json!(42)));
+    }
+
+    #[test]
+    fn quota_pct_computed_when_missing() {
+        let mut s = secs(DEVANA);
+        s.insert("myquota".into(), "user me (1) /home : 50GB / 200GB".into());
+        let v = machine_json(&machine("Devana", "me", ""), &s);
+        assert_eq!(v["quotas"][0]["pct"], 25);
+    }
+
+    #[test]
+    fn pbs_machine_unsupported() {
+        let m = machine("Polaris", "u", "scheduler = \"pbs\"");
+        assert_eq!(
+            unsupported_json(&m),
+            Some(json!({ "name": "Polaris", "error": null, "projects": [], "quotas": [], "unsupported": "pbs" }))
+        );
+        assert_eq!(unsupported_json(&machine("P", "u", "")), None);
     }
 }
