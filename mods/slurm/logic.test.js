@@ -4,7 +4,7 @@ import {
   endedJobs, notifyLevel, gpuUnderuse, storageColorKey, storagePct,
   storageAlerts, formatStart, shouldLead, jobNotice, storageNotice, adoptState, mustAdopt,
   jobButtons, confirmText, factsLine, gpuChip, partitionLabel, partitionColorKey, storageLabel,
-  pendingStart, logTabs, logLines, agentPrompt,
+  pendingStart, logTabs, logLines, agentPrompt, endedSummary,
 } from "./logic.js";
 
 const job = (id, state, name = "j" + id) => ({ id, name, state });
@@ -272,4 +272,16 @@ test("agentPrompt holds the job facts, tails and the request", () => {
 test("agentPrompt tolerates a job without detail", () => {
   const p = agentPrompt({ machine: "Perun", ssh_target: "h", id: "9", state: "PENDING" });
   assert.ok(p.includes("Use ssh h to read more of the logs."));
+});
+
+test("endedSummary groups many ended jobs into one toast", () => {
+  const notices = [
+    ...Array(3).fill({ level: "success", state: "COMPLETED" }),
+    ...Array(4).fill({ level: "error", state: "FAILED" }),
+  ];
+  assert.deepEqual(endedSummary("Devana", notices), {
+    title: "Devana: 7 jobs ended", body: "3 COMPLETED, 4 FAILED", level: "error",
+  });
+  assert.equal(endedSummary("P", [{ level: "success", state: "COMPLETED" }, { level: "warning", state: "UNKNOWN" }]).level, "warning");
+  assert.equal(endedSummary("P", [{ level: "success", state: "COMPLETED" }]).level, "success");
 });
