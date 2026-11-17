@@ -11,6 +11,7 @@ const TICK_MS = 5000;
 const SNAPSHOT_MS = 20000;
 const CLUSTER_MS = 120000;
 const PROJECTS_MS = 600000;
+const PROJECTS_RETRY_MS = 120000;
 const FINAL_MAX_IDS = 50;
 // More ended jobs than this on one machine in one poll get a single summary toast.
 const SUMMARY_OVER = 5;
@@ -182,9 +183,10 @@ export default class Slurm extends View {
       try {
         pr = JSON.parse((await exec(this.bin, ["projects"], { timeout: 120000 })).stdout);
       } catch (_e) {
-        // Optional like cluster data; the next round retries.
+        // Optional like cluster data; retried after PROJECTS_RETRY_MS.
       }
       this.projBusy = false;
+      if (!pr || pr.error) this.lastProjects = Date.now() - PROJECTS_MS + PROJECTS_RETRY_MS;
       if (!pr || !this.holdsLease()) return;
       pr = mergeProjects(this.projects, pr);
       this.projects = pr;
