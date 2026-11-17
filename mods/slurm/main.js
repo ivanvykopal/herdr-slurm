@@ -2,7 +2,7 @@ import { View, div } from "gpui-kit";
 import { v_flex, h_flex, ScrollHandle } from "gpui-base";
 import { exec, theme, props, shared, setShared, notify, playSound, checking, run, settings } from "herdr";
 import { endedJobs, storageAlerts, shouldLead, mustAdopt, jobNotice, storageNotice, adoptState, pendingStart, agentPrompt, endedSummary,
-  projectAlerts, projectNotice } from "./logic.js";
+  projectAlerts, projectNotice, mergeProjects } from "./logic.js";
 import { detailBlock } from "./detail.js";
 import { clusterStrip } from "./strip.js";
 import { projectsBlock } from "./projects.js";
@@ -186,6 +186,7 @@ export default class Slurm extends View {
       }
       this.projBusy = false;
       if (!pr || !this.holdsLease()) return;
+      pr = mergeProjects(this.projects, pr);
       this.projects = pr;
       const p = projectAlerts(this.projArmed, pr);
       this.projArmed = p.armed;
