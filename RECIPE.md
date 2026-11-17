@@ -140,7 +140,8 @@ it. Finished jobs and nearly full storage raise notifications.
   and makes no network request of its own.
 - Needs `cargo install --path . --locked` first, so the `herdr-slurm` on PATH
   has the `job`, `action`, `final` and `cluster` subcommands. An older binary
-  shows the job list but no detail, strip or notifications.
+  shows the job list; the expanded block shows only an error, there is no
+  strip or storage alert, and finished jobs are reported as `UNKNOWN`.
 - Cancel, Requeue, Hold and Release act on the real scheduler.
 - `Terminal on node` and `GPU usage` use `srun --overlap`, so they need Slurm
   and a RUNNING job.
